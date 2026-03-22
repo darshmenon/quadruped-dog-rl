@@ -6,6 +6,8 @@ Supports: Unitree Go1/Go2, Boston Dynamics Spot, MIT Mini Cheetah, ANYmal B/C, M
 
 ![Unitree Go2 in RViz2](docs/images/go2_rviz2.png)
 
+![Unitree Go2 in Gazebo Garden](docs/images/go2_gazebo.png)
+
 ---
 
 ## Repository Structure
