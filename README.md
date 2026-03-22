@@ -143,6 +143,88 @@ Or use the helper scripts:
 
 ---
 
+## Intelligence Modules
+
+Higher-level autonomy stack built on top of the base simulation and RL policy.
+
+```
+intelligence/
+├── gait/
+│   └── gait_scheduler.py       # Auto-select gait (walk/trot/canter/bound) by speed
+├── perception/
+│   └── terrain_estimator.py    # Classify terrain (flat/slope/stairs/rough) from IMU + foot forces
+├── navigation/
+│   └── waypoint_navigator.py   # Autonomous waypoint following via pure pursuit
+├── terrain/
+│   └── adaptive_controller.py  # Fuse terrain + gait into safe velocity commands
+└── llm_commander/
+    └── llm_commander.py        # Natural language -> robot commands via Claude API
+```
+
+### Gait Scheduler
+
+Auto-selects the right gait based on commanded speed:
+
+| Speed (m/s) | Gait   | Foot pattern |
+|-------------|--------|--------------|
+| 0 – 0.05    | Stand  | All feet down |
+| 0.05 – 0.4  | Walk   | One foot at a time |
+| 0.4 – 1.5   | Trot   | Diagonal pairs (FL+RR, FR+RL) |
+| 1.5 – 2.5   | Canter | Three-beat |
+| 2.5 – 4.0   | Bound  | Front pair then rear pair |
+| 4.0+        | Pronk  | All four feet airborne |
+
+### Terrain Estimator
+
+Classifies terrain from IMU and foot contact forces, outputs recommended speed limit and foot clearance:
+
+```python
+from intelligence.perception.terrain_estimator import TerrainEstimator
+estimator = TerrainEstimator()
+result = estimator.estimate(imu_roll=0.1, imu_pitch=0.05, contacts=[120, 115, 118, 122])
+# TerrainEstimate(terrain_type=flat, slope_deg=6.6, recommended_speed_limit=3.0)
+```
+
+### Waypoint Navigator (ROS2)
+
+Autonomous point-to-point navigation using pure pursuit:
+
+```bash
+ros2 run quadruped_dog_rl waypoint_navigator --ros-args \
+    -p waypoints:="[[2.0,0.0],[2.0,2.0],[0.0,2.0],[0.0,0.0]]" \
+    -p linear_speed:=0.5
+```
+
+### LLM Commander (Natural Language)
+
+Control the robot with plain English using Claude API:
+
+```bash
+export ANTHROPIC_API_KEY=your_key
+python3 intelligence/llm_commander/llm_commander.py
+```
+
+Then publish commands:
+
+```bash
+ros2 topic pub /natural_language_cmd std_msgs/msg/String "data: 'trot forward at medium speed'"
+ros2 topic pub /natural_language_cmd std_msgs/msg/String "data: 'turn left slowly'"
+ros2 topic pub /natural_language_cmd std_msgs/msg/String "data: 'stop'"
+```
+
+### Adaptive Controller
+
+Combines terrain estimation + gait scheduling into a single safe command output:
+
+```python
+from intelligence.terrain.adaptive_controller import AdaptiveController
+ctrl = AdaptiveController()
+cmd = ctrl.adapt(desired_speed=1.2, imu_pitch=0.12, contacts=[110,115,108,120])
+# AdaptedCommand(linear_x=1.0, gait='trot', terrain='slope', foot_clearance=0.08)
+```
+
+---
+
 ## References
 
 - [CHAMP Framework](https://github.com/chvmp/champ) — ROS2 locomotion controller
