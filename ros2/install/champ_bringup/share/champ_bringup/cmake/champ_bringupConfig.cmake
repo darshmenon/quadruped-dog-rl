@@ -1,0 +1,1 @@
+/home/asimov/quadruped-dog-rl/ros2/build/champ_bringup/ament_cmake_core/champ_bringupConfig.cmake

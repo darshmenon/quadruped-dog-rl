@@ -4,6 +4,8 @@ Quadruped robot dog simulation, walking control, and reinforcement learning poli
 
 Supports: Unitree Go1/Go2, Boston Dynamics Spot, MIT Mini Cheetah, ANYmal B/C, Mini Pupper.
 
+![Unitree Go2 in RViz2](docs/images/go2_rviz2.png)
+
 ---
 
 ## Repository Structure

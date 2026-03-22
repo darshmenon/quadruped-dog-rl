@@ -1,0 +1,1 @@
+/home/asimov/quadruped-dog-rl/ros2/build/champ_msgs/rosidl_generator_py/champ_msgs/msg/_point.py

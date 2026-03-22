@@ -1,0 +1,1 @@
+/home/asimov/quadruped-dog-rl/ros2/build/champ_msgs/ament_cmake_core/champ_msgsConfig.cmake

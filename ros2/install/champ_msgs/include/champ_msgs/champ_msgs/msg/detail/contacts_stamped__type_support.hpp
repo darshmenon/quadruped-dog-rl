@@ -1,0 +1,1 @@
+/home/asimov/quadruped-dog-rl/ros2/build/champ_msgs/rosidl_generator_cpp/champ_msgs/msg/detail/contacts_stamped__type_support.hpp
