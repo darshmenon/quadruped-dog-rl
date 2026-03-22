@@ -14,127 +14,130 @@ Supports: Unitree Go1/Go2, Boston Dynamics Spot, MIT Mini Cheetah, ANYmal B/C, M
 quadruped-dog-rl/
 ├── urdf/                    # Robot URDF and mesh files
 │   ├── go1_config/          # Unitree Go1
-│   ├── go2_unitree/         # Unitree Go2
+│   ├── go2_unitree/         # Unitree Go2 (with DAE meshes)
 │   ├── spot_config/         # Boston Dynamics Spot
 │   ├── mini_cheetah_config/ # MIT Mini Cheetah
 │   ├── mini_pupper_config/  # Mini Pupper
-│   ├── anymal_b_config/     # ANYmal B
-│   └── anymal_c_config/     # ANYmal C
-├── ros2/                    # ROS2 packages (CHAMP framework)
-│   ├── champ_bringup/       # Launch files for hardware and simulation
-│   ├── champ_config/        # Robot-specific configurations
-│   ├── champ_description/   # Robot description and URDF loading
-│   ├── champ_gazebo/        # Gazebo simulation launch and worlds
-│   └── champ_navigation/    # Navigation stack integration
-└── training/                # RL policy training (Unitree RL Gym)
-    ├── legged_gym/          # PPO training scripts and environments
-    ├── deploy/              # Policy deployment to real robot
-    └── setup.py             # Package install
+│   ├── anymal_b_config/     # ANYmal B (ETH Zurich)
+│   └── anymal_c_config/     # ANYmal C (ETH Zurich)
+├── ros2/                    # ROS2 packages (CHAMP framework, ros2 branch)
+│   ├── champ/               # Core locomotion controller
+│   ├── champ_base/          # Hardware abstraction layer
+│   ├── champ_bringup/       # Launch files
+│   ├── champ_config/        # Robot-specific configs
+│   ├── champ_description/   # URDF loading
+│   ├── champ_gazebo/        # Gazebo simulation
+│   ├── champ_navigation/    # Navigation stack
+│   ├── champ_teleop/        # Keyboard/joystick teleoperation
+│   └── robots/              # Pre-configured robot packages
+├── launch/                  # Top-level launch files
+│   ├── view_go2.launch.py   # View Go2 URDF in RViz2
+│   ├── gazebo_go2.launch.py # Spawn Go2 in Gazebo Garden
+│   ├── gazebo_sim.launch.py # Generic Gazebo sim launcher
+│   ├── rviz_view.launch.py  # Generic RViz2 viewer
+│   └── policy_deploy.launch.py # Deploy trained RL policy
+├── scripts/                 # Shell scripts for common tasks
+│   ├── train_policy.sh      # Train walking policy
+│   ├── play_policy.sh       # Visualize trained policy
+│   └── launch_sim.sh        # Launch Gazebo sim
+├── training/                # RL policy training (Unitree RL Gym)
+│   ├── legged_gym/          # PPO training scripts and environments
+│   ├── deploy/              # Policy deployment to real robot
+│   └── setup.py
+├── description/             # Robot description docs and joint conventions
+└── interfaces/              # Custom ROS2 msgs, srvs, actions (placeholder)
 ```
 
 ---
 
-## Requirements
+## System Requirements
 
-### System
 - Ubuntu 22.04
-- ROS2 Humble or Jazzy
+- ROS2 Humble
+- Gazebo Garden (gz-sim7) — already works with `ros_gz_sim`
 - Python 3.8+
-- NVIDIA GPU (10GB+ VRAM for training)
+- NVIDIA GPU with 10GB+ VRAM for RL training
 
-### Install ROS2 dependencies
+---
 
-```bash
-sudo apt install ros-humble-gazebo-ros-pkgs \
-                 ros-humble-joint-state-publisher \
-                 ros-humble-robot-state-publisher \
-                 ros-humble-rviz2
-```
-
-### Install CHAMP
+## Build ROS2 Packages
 
 ```bash
 cd ros2
-pip install -r champ_bringup/requirements.txt
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --cmake-args -DBUILD_TESTING=OFF
+source install/setup.bash
 ```
-
-### Install RL training
-
-```bash
-cd training
-pip install -e .
-```
-
-For GPU training also install Isaac Gym:
-- Download from https://developer.nvidia.com/isaac-gym
-- Follow their `install.sh` instructions
 
 ---
 
-## Walking Simulation (ROS2 + Gazebo)
-
-### Launch Go1 in Gazebo
+## View Go2 in RViz2
 
 ```bash
 source /opt/ros/humble/setup.bash
-ros2 launch champ_config gazebo.launch.py
+ros2 launch launch/view_go2.launch.py
 ```
 
-### Teleoperate with keyboard
+Opens RViz2 with the full Go2 mesh and a joint slider GUI to pose the legs.
+
+---
+
+## Spawn Go2 in Gazebo Garden
 
 ```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
+source /opt/ros/humble/setup.bash
+ros2 launch launch/gazebo_go2.launch.py
 ```
 
-### Visualize in RViz2
+Starts Gazebo Garden, spawns the Go2, bridges topics to ROS2, and opens RViz2 alongside it.
+
+Send velocity commands:
 
 ```bash
-ros2 launch champ_description description.launch.py
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}}" --once
 ```
-
-### Switch robot (Spot, Mini Cheetah, etc.)
-
-Edit `ros2/champ_config/config/robot_config.yaml` and set the URDF path to your chosen robot under `urdf/`.
 
 ---
 
 ## RL Policy Training
 
-### Train a Go2 walking policy
+Requires Isaac Gym — download from https://developer.nvidia.com/isaac-gym
 
 ```bash
 cd training
+pip install -e .
+
+# Train Go2 walking policy
 python legged_gym/scripts/train.py --task=go2 --headless
-```
 
-Training logs and checkpoints are saved under `training/logs/`.
-
-### Play/visualize trained policy
-
-```bash
+# Visualize trained policy
 python legged_gym/scripts/play.py --task=go2
+
+# Deploy to real robot
+cd deploy
+python deploy.py --task=go2 --ckpt=<path_to_checkpoint>
 ```
 
-### Deploy to real robot
+Or use the helper scripts:
 
 ```bash
-cd training/deploy
-python deploy.py --task=go2 --ckpt=<path_to_checkpoint>
+./scripts/train_policy.sh go2
+./scripts/play_policy.sh go2
 ```
 
 ---
 
-## Available Robots and URDF Paths
+## Available Robots
 
-| Robot | URDF Path | Notes |
-|-------|-----------|-------|
-| Unitree Go1 | `urdf/go1_config/` | Good for sim-to-real |
-| Unitree Go2 | `urdf/go2_unitree/urdf/` | Latest Unitree model |
-| Boston Dynamics Spot | `urdf/spot_config/` | |
-| MIT Mini Cheetah | `urdf/mini_cheetah_config/` | Research platform |
-| ANYmal B | `urdf/anymal_b_config/` | ETH Zurich |
-| ANYmal C | `urdf/anymal_c_config/` | ETH Zurich |
-| Mini Pupper | `urdf/mini_pupper_config/` | Low-cost platform |
+| Robot | URDF Path | RL Task |
+|-------|-----------|---------|
+| Unitree Go1 | `urdf/go1_config/` | `go1` |
+| Unitree Go2 | `urdf/go2_unitree/urdf/go2.urdf` | `go2` |
+| Boston Dynamics Spot | `urdf/spot_config/` | — |
+| MIT Mini Cheetah | `urdf/mini_cheetah_config/` | — |
+| ANYmal B | `urdf/anymal_b_config/` | — |
+| ANYmal C | `urdf/anymal_c_config/` | — |
+| Mini Pupper | `urdf/mini_pupper_config/` | — |
 
 ---
 
@@ -142,5 +145,5 @@ python deploy.py --task=go2 --ckpt=<path_to_checkpoint>
 
 - [CHAMP Framework](https://github.com/chvmp/champ) — ROS2 locomotion controller
 - [Unitree RL Gym](https://github.com/unitreerobotics/unitree_rl_gym) — PPO policy training
-- [legged_gym (ETH)](https://github.com/leggedrobotics/legged_gym) — Original RL gym
-- [Isaac Lab](https://github.com/isaac-sim/IsaacLab) — Modern training framework
+- [legged_gym (ETH Zurich)](https://github.com/leggedrobotics/legged_gym) — original RL gym
+- [Isaac Lab](https://github.com/isaac-sim/IsaacLab) — modern GPU training framework
