@@ -1,1 +1,0 @@
-/home/asimov/quadruped-dog-rl/ros2/build/champ_description/ament_cmake_environment_hooks/local_setup.zsh

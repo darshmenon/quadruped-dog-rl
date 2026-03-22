@@ -1,1 +1,0 @@
-/home/asimov/quadruped-dog-rl/ros2/build/champ_msgs/rosidl_typesupport_fastrtps_cpp/champ_msgs/msg/detail/joints__rosidl_typesupport_fastrtps_cpp.hpp

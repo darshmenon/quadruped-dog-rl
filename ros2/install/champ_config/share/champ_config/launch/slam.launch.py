@@ -1,1 +1,0 @@
-/home/asimov/quadruped-dog-rl/ros2/champ_config/launch/slam.launch.py

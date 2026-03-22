@@ -1,1 +1,0 @@
-/home/asimov/quadruped-dog-rl/ros2/champ_navigation/launch/navigate.launch.py

@@ -1,1 +1,0 @@
-/home/asimov/quadruped-dog-rl/ros2/build/champ/ament_cmake_core/champConfig-version.cmake

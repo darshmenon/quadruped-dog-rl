@@ -12,3 +12,8 @@ runs/
 logs/
 *.pt
 *.pth
+
+# ROS2 build artifacts
+ros2/install/
+ros2/build/
+ros2/log/
