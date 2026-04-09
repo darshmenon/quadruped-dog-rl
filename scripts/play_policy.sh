@@ -8,8 +8,9 @@
 set -e
 
 TASK=${1:-go2}
+PYTHON_BIN=${PYTHON:-python3}
 
 echo "Playing task: $TASK"
 
 cd training
-python legged_gym/scripts/play.py --task="$TASK"
+"$PYTHON_BIN" legged_gym/scripts/play.py --task="$TASK"

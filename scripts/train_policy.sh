@@ -14,8 +14,9 @@ set -e
 
 TASK=${1:-go2}
 HEADLESS=${2:-""}
+PYTHON_BIN=${PYTHON:-python3}
 
 echo "Training task: $TASK"
 
 cd training
-python legged_gym/scripts/train.py --task="$TASK" $HEADLESS
+"$PYTHON_BIN" legged_gym/scripts/train.py --task="$TASK" $HEADLESS
