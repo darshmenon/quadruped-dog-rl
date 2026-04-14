@@ -50,8 +50,8 @@ class AdaptiveController:
             contacts=contacts,
         )
 
-        # Clamp speed to terrain limit
-        safe_speed = min(desired_speed, terrain.recommended_speed_limit)
+        # Clamp speed to terrain limit (negative speeds are clamped to zero)
+        safe_speed = min(max(desired_speed, 0.0), terrain.recommended_speed_limit)
 
         # On steep slopes, reduce angular too
         if terrain.terrain_type == TerrainType.SLOPE:

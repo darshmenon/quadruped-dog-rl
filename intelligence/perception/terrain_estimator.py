@@ -51,6 +51,9 @@ class TerrainEstimator:
         contacts: List[float],  # [FL, FR, RL, RR] normal forces (N)
     ) -> TerrainEstimate:
 
+        if not contacts:
+            contacts = [0.0, 0.0, 0.0, 0.0]
+
         slope_deg = math.degrees(math.sqrt(imu_roll**2 + imu_pitch**2))
 
         self.contact_history.append(contacts)

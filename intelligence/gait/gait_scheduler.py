@@ -53,10 +53,13 @@ class GaitScheduler:
         self.current_gait = Gait.STAND
 
     def select_gait(self, speed: float) -> Gait:
+        if speed < 0:
+            return Gait.STAND
         for gait, params in GAITS.items():
             if params.speed_range[0] <= speed < params.speed_range[1]:
                 return gait
-        return Gait.BOUND
+        # Speed exceeds all defined ranges — use the fastest gait
+        return Gait.PRONK
 
     def get_gait_params(self, speed: float) -> GaitParams:
         gait = self.select_gait(speed)
