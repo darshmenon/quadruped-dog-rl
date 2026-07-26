@@ -42,6 +42,10 @@ CTRL_DECIMATION = 4   # policy at 50 Hz, sim at 200 Hz
 
 TARGET_HEIGHT = 0.27  # nominal base height above ground while standing
 
+ALIVE_BONUS  = 0.3    # per-step credit for still standing, so ending an
+                       # episode early is never a shortcut to avoid penalties
+FALL_PENALTY = -8.0    # one-time hit applied on the step that trips termination
+
 
 class Go2MujocoEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
@@ -138,12 +142,12 @@ class Go2MujocoEnv(gym.Env):
         components = dict(
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
-            stall=r_stall,
+            stall=r_stall, alive=ALIVE_BONUS,
         )
         return float(sum(components.values())), components
 
     def _sample_cmd(self) -> np.ndarray:
-        max_vx = 0.3 + 0.9 * self.curriculum_level
+        max_vx = 0.15 + 1.05 * self.curriculum_level
         vx = float(self.np_random.uniform(-0.1, max_vx))
         vy = float(self.np_random.uniform(-0.2, 0.2)) * self.curriculum_level
         wz = float(self.np_random.uniform(-0.5, 0.5)) * self.curriculum_level
@@ -207,6 +211,10 @@ class Go2MujocoEnv(gym.Env):
         obs = self._get_obs()
         terminated = self._is_terminated()
         truncated  = self._step_count >= self._max_steps
+
+        if terminated:
+            reward += FALL_PENALTY
+            components["fall"] = FALL_PENALTY
 
         if self.render_mode == "human":
             self.render()
