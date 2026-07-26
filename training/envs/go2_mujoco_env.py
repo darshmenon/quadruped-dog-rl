@@ -51,7 +51,8 @@ class Go2MujocoEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(self, cmd=(0.5, 0.0, 0.0), render_mode=None,
-                 randomize_domain=True, use_curriculum=True):
+                 randomize_domain=True, use_curriculum=True,
+                 initial_curriculum_level=0.0):
         super().__init__()
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
         self.data = mujoco.MjData(self.model)
@@ -67,7 +68,7 @@ class Go2MujocoEnv(gym.Env):
         self._max_steps = int(EPISODE_LEN_S / (SIM_DT * CTRL_DECIMATION))
         self._last_episode_steps = self._max_steps
 
-        self.curriculum_level = 0.0
+        self.curriculum_level = float(initial_curriculum_level)
 
         # cache original model params for domain randomization
         self._base_body_id = mujoco.mj_name2id(
@@ -169,8 +170,14 @@ class Go2MujocoEnv(gym.Env):
         z = float(self.data.qpos[2])
         if z < 0.15 or z > 0.8:
             return True
+        # 1 - 2*(w^2 + z_q^2) == 2*(x^2 + y^2) - 1 == -cos(tilt) for a unit
+        # quaternion, so the old `> 0.5` threshold only tripped past 120
+        # degrees of pitch/roll - permissive enough that the policy could
+        # rear up onto its hind legs and sustain a ~70-80 degree "wheelie"
+        # for many steps before actually falling. -0.5 corresponds to ~60
+        # degrees, a sane cutoff for a quadruped.
         w, x, y, z_q = self.data.sensor("orientation").data
-        return bool(1 - 2 * (w * w + z_q * z_q) > 0.5)
+        return bool(1 - 2 * (w * w + z_q * z_q) > -0.5)
 
     # ------------------------------------------------------------------ #
 

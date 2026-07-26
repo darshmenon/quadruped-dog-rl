@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import glob
 import os
 import sys
 
@@ -23,11 +24,13 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.utils import get_schedule_fn
 
 from envs.go2_mujoco_env import Go2MujocoEnv
 
 LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs", "mujoco")
 CKPT_DIR = os.path.join(LOG_DIR, "checkpoints")
+CURRICULUM_PATH = os.path.join(LOG_DIR, "curriculum_level.txt")
 
 
 # --------------------------------------------------------------------------- #
@@ -79,10 +82,11 @@ class VecNormSaveCallback(BaseCallback):
 # Env factory
 # --------------------------------------------------------------------------- #
 
-def make_env(cmd, rank, seed=0):
+def make_env(cmd, rank, seed=0, curriculum_level=0.0):
     def _init():
         env = Go2MujocoEnv(cmd=cmd, render_mode=None,
-                           randomize_domain=True, use_curriculum=True)
+                           randomize_domain=True, use_curriculum=True,
+                           initial_curriculum_level=curriculum_level)
         env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
@@ -101,15 +105,35 @@ def main():
                         metavar=("LIN_X", "LIN_Y", "ANG_YAW"))
     parser.add_argument("--resume", type=str, default=None,
                         help="path to .zip checkpoint")
+    parser.add_argument("--learning_rate", type=float, default=None,
+                        help="override the resumed model's learning rate (fresh runs use 3e-4)")
+    parser.add_argument("--n_epochs", type=int, default=None,
+                        help="override the resumed model's PPO epochs per update (fresh runs use 10)")
+    parser.add_argument("--curriculum_level", type=float, default=None,
+                        help="starting curriculum level (0-1); defaults to the value saved by "
+                             "the previous run, or 0.0 if none was saved")
+    parser.add_argument("--vecnorm", type=str, default=None,
+                        help="path to a VecNormalize .pkl to load with --resume; "
+                             "defaults to the nearest-matching checkpoint by step count")
     args = parser.parse_args()
 
     os.makedirs(CKPT_DIR, exist_ok=True)
     cmd = tuple(args.cmd)
 
-    print(f"Training Go2 (MuJoCo) | cmd={cmd} | envs={args.n_envs} | steps={args.timesteps}")
+    if args.curriculum_level is None:
+        if os.path.exists(CURRICULUM_PATH):
+            with open(CURRICULUM_PATH) as f:
+                args.curriculum_level = float(f.read().strip())
+            print(f"Loaded curriculum_level={args.curriculum_level:.3f} from {CURRICULUM_PATH}")
+        else:
+            args.curriculum_level = 0.0
+
+    print(f"Training Go2 (MuJoCo) | cmd={cmd} | envs={args.n_envs} | steps={args.timesteps} "
+          f"| curriculum_level={args.curriculum_level:.3f}")
 
     # ---- training envs with obs + reward normalisation ----
-    vec_env = DummyVecEnv([make_env(cmd, i) for i in range(args.n_envs)])
+    vec_env = DummyVecEnv([make_env(cmd, i, curriculum_level=args.curriculum_level)
+                           for i in range(args.n_envs)])
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
                            clip_obs=10.0, clip_reward=10.0)
 
@@ -136,15 +160,34 @@ def main():
     ]
 
     if args.resume:
-        # try to load matching vecnorm stats (name: vecnorm_<steps>_steps.pkl)
-        ckpt_stem  = os.path.basename(args.resume).replace(".zip", "")
-        steps_part = ckpt_stem.split("_steps")[0].split("_")[-1]
-        norm_path  = os.path.join(CKPT_DIR, f"vecnorm_{steps_part}_steps.pkl")
-        if os.path.exists(norm_path):
+        norm_path = args.vecnorm
+        if norm_path is None:
+            # find the vecnorm_<steps>_steps.pkl whose step count is closest
+            # to the checkpoint being resumed (exact match is rare, since
+            # CheckpointCallback and VecNormSaveCallback save on independent
+            # step counters)
+            ckpt_stem   = os.path.basename(args.resume).replace(".zip", "")
+            ckpt_steps  = int(ckpt_stem.split("_steps")[0].split("_")[-1])
+            candidates  = glob.glob(os.path.join(CKPT_DIR, "vecnorm_*_steps.pkl"))
+            if candidates:
+                def _steps(p):
+                    return int(os.path.basename(p).split("_steps")[0].split("_")[-1])
+                norm_path = min(candidates, key=lambda p: abs(_steps(p) - ckpt_steps))
+        if norm_path and os.path.exists(norm_path):
             vec_env = VecNormalize.load(norm_path, vec_env.venv)
             vec_env.norm_reward = True
             print(f"Loaded VecNormalize stats from {norm_path}")
+        else:
+            print("WARNING: no VecNormalize stats found to load — starting with fresh "
+                  "obs/reward normalization, which will destabilize early fine-tuning.")
         model = PPO.load(args.resume, env=vec_env, tensorboard_log=LOG_DIR)
+        if args.learning_rate is not None:
+            model.learning_rate = args.learning_rate
+            model.lr_schedule = get_schedule_fn(args.learning_rate)
+            print(f"Overrode learning_rate={args.learning_rate}")
+        if args.n_epochs is not None:
+            model.n_epochs = args.n_epochs
+            print(f"Overrode n_epochs={args.n_epochs}")
         print(f"Resumed from {args.resume}")
     else:
         model = PPO(
@@ -172,6 +215,12 @@ def main():
 
     model.save(os.path.join(LOG_DIR, "go2_mujoco_final"))
     vec_env.save(os.path.join(LOG_DIR, "vecnorm_final.pkl"))
+
+    final_curriculum = float(np.mean(vec_env.get_attr("curriculum_level")))
+    with open(CURRICULUM_PATH, "w") as f:
+        f.write(str(final_curriculum))
+    print(f"Final curriculum_level={final_curriculum:.3f} saved to {CURRICULUM_PATH}")
+
     print("Training done. Model saved to", LOG_DIR)
     vec_env.close()
     eval_env.close()
