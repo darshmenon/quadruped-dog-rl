@@ -72,6 +72,17 @@ REACH_MAX_RADIUS_HARD = 0.42  # max radius at curriculum_level=1 (< arm_ik.py's
 REACH_SUCCESS_DIST = 0.05  # fingertip-to-target distance counted as "reached"
 REACH_SIGMA = 0.12         # width of the reach-distance reward kernel
 REACH_WEIGHT = 0.8
+
+# Two training runs both saw eval reward peak (~460) with curriculum_level
+# around 0.8-0.85 (max cmd speed ~1.0 m/s, reach radius ~0.37m) and then
+# degrade as the episode-length-only success signal kept pushing curriculum_
+# level toward 1.0 -- by ~0.99, reach reward had collapsed to ~0 (arm no
+# longer tracking targets at all) and eval reward had dropped to ~140. The
+# success metric (did the episode survive) doesn't require the walk+reach
+# task to still be going well, so it kept escalating difficulty past the
+# point the policy could actually hold both. Capping below 1.0 keeps
+# training in the region both runs demonstrated actually works.
+MAX_CURRICULUM_LEVEL = 0.85
 REACH_SUCCESS_BONUS = 0.5
 
 
@@ -263,7 +274,8 @@ class Go2MujocoEnv(gym.Env):
         if self.use_curriculum:
             success = self._last_episode_steps >= 0.75 * self._max_steps
             self.curriculum_level = float(np.clip(
-                self.curriculum_level + (0.005 if success else -0.002), 0.0, 1.0))
+                self.curriculum_level + (0.005 if success else -0.002),
+                0.0, MAX_CURRICULUM_LEVEL))
             self.cmd = self._sample_cmd()
             self.reach_target = self._sample_reach_target()
 
