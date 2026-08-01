@@ -62,19 +62,28 @@ class RewardComponentCallback(BaseCallback):
 
 
 class VecNormSaveCallback(BaseCallback):
-    """Saves VecNormalize running stats alongside every model checkpoint."""
+    """Saves VecNormalize running stats and curriculum_level alongside every
+    model checkpoint, so an interrupted run (crash, OOM, preemption) doesn't
+    leave curriculum_level.txt stuck at a stale value behind the checkpoint
+    it'll actually be resumed from -- previously that file was only written
+    once, after model.learn() returned normally."""
 
-    def __init__(self, vec_env: VecNormalize, save_path: str, save_freq: int):
+    def __init__(self, vec_env: VecNormalize, save_path: str, save_freq: int,
+                 curriculum_path: str):
         super().__init__()
-        self._vec_env   = vec_env
-        self._save_path = save_path
-        self._save_freq = save_freq
+        self._vec_env         = vec_env
+        self._save_path       = save_path
+        self._save_freq       = save_freq
+        self._curriculum_path = curriculum_path
 
     def _on_step(self) -> bool:
         if self.num_timesteps % self._save_freq < self.training_env.num_envs:
             path = os.path.join(self._save_path,
                                 f"vecnorm_{self.num_timesteps}_steps.pkl")
             self._vec_env.save(path)
+            level = float(np.mean(self._vec_env.get_attr("curriculum_level")))
+            with open(self._curriculum_path, "w") as f:
+                f.write(str(level))
         return True
 
 
@@ -147,7 +156,8 @@ def main():
         RewardComponentCallback(log_interval=1000),
         CheckpointCallback(save_freq=50_000, save_path=CKPT_DIR,
                            name_prefix="go2_mujoco"),
-        VecNormSaveCallback(vec_env, CKPT_DIR, save_freq=50_000),
+        VecNormSaveCallback(vec_env, CKPT_DIR, save_freq=50_000,
+                            curriculum_path=CURRICULUM_PATH),
         EvalCallback(
             eval_env,
             best_model_save_path=LOG_DIR,
@@ -188,6 +198,10 @@ def main():
         if args.n_epochs is not None:
             model.n_epochs = args.n_epochs
             print(f"Overrode n_epochs={args.n_epochs}")
+        # checkpoints saved before this fix have target_kl=None baked in from
+        # PPO.load(); reapply it so resumed runs get the same early-stopping
+        # protection as fresh ones (see comment on the fresh-init PPO() call).
+        model.target_kl = 0.03
         print(f"Resumed from {args.resume}")
     else:
         model = PPO(
@@ -202,6 +216,14 @@ def main():
             clip_range=0.2,
             ent_coef=0.005,
             max_grad_norm=1.0,
+            # Without this, a rollout batch runs all 10 epochs regardless of
+            # how far the policy has already drifted -- this run's log shows
+            # approx_kl climbing 0.017 -> 0.10 and clip_fraction 0.2 -> 0.6
+            # over 3M steps with no ceiling, and eval reward collapsed from
+            # 458 (peak, ~800k steps) to ~120 by 1.6M and never recovered.
+            # target_kl stops epoch iteration early once a batch's KL exceeds
+            # this, capping how far a single update can drag the policy.
+            target_kl=0.03,
             policy_kwargs=dict(net_arch=[512, 256, 128]),
             tensorboard_log=LOG_DIR,
             verbose=1,

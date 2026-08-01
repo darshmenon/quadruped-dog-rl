@@ -442,13 +442,23 @@ The Gazebo launch starts paused, spawns the Go2, resets it upright, starts
 This avoids the robot falling onto its back before the joint controllers receive
 their first commands.
 
-> **Known issue:** forward walking via `/cmd_vel` is currently unstable —
-> the robot repeatedly trips its own fall-detector (base height check in
-> `stand_go2_gz.py`) instead of translating, even on flat ground. Standing
-> in place and the fall-recovery reset both work correctly; the IK/gait
-> logic that turns a commanded speed into leg trajectories needs further
-> tuning to produce clean locomotion. Tracked as follow-up work, separate
-> from the multi-terrain world below.
+> **Fixed, retrain needed:** forward walking via `/cmd_vel` previously
+> tripped the robot's own fall-detector instead of translating, even on
+> flat ground. Root cause: `Go2GazeboEnv`'s RL reward compared `ang_vel[0]`
+> (roll rate) against `cmd[0]` (the linear speed target) — a copy/paste bug
+> that never rewarded actual forward progress, since the env didn't
+> subscribe to `/odom` at all. The termination check also used the same
+> stale `> 0.5` tilt threshold (~120°) already fixed for the MuJoCo backend
+> but never ported here. Both are fixed in `training/envs/go2_gazebo_env.py`
+> — it now subscribes to `/odom` (published by `scripts/gz_pose_to_odom.py`,
+> already auto-launched) and uses real linear velocity in the reward, and
+> terminates at the same ~60° tilt as MuJoCo. `train_gazebo.py`'s
+> `EvalCallback` was also removed: it pointed at the same live env PPO was
+> training on rather than a separate instance, so its periodic eval
+> episodes reset/stepped the sim out from under the in-progress rollout
+> collection every 10k steps. No Gazebo-backend checkpoint has been trained
+> against these fixes yet — treat forward walking here as unverified until
+> a training run completes.
 
 #### Multi-terrain world
 
@@ -575,7 +585,9 @@ VecNormalize stats are auto-detected from the checkpoint directory.
 
 ![Go2 MuJoCo policy viewer](docs/images/go2_policy.png)
 
-> **Known issue:** on `go2_mujoco_final.zip`, commanding `vx=+0.50` produces an actual `vx≈+0.01` (robot stands in place) while reward still reads `+0.975` — near the top of the scale. That points to the velocity-tracking reward term being too weak relative to the alive/orientation/height terms, letting the policy collect near-max reward by standing still instead of walking. `training/envs/go2_mujoco_env.py` now doubles the velocity-tracking weight, tightens its tracking kernel, and adds an explicit stall penalty (`r_stall`) so standing still under a real command can no longer out-earn walking — but this checkpoint predates that change and no retrain has been run against it yet, so treat it as unverified until a fresh policy is trained and re-evaluated.
+> **Status:** the old stall-reward bug here (policy collecting near-max reward by standing still) is fixed and verified — `best_model.zip` walks a full 20s episode without falling at `cmd=(0.5, 0, 0)`.
+>
+> **Known issue (active):** `go2_mujoco_env.py` grew a combined walk+arm-reach objective, gated by one shared `curriculum_level`. In the training run that produced the current `best_model.zip`, eval reward peaked at 462.97±4.57 around curriculum_level≈0.85 (1.2M steps), then degraded as curriculum climbed toward its 1.0 ceiling — by 2.8M steps eval reward had dropped to ~140 and the `reach` reward component (arm tracking its target) had collapsed to ~0, meaning the arm effectively stops tracking once command speed and reach radius both hit their hardest range. `PPO`'s missing `target_kl` (now added — see `train_mujoco.py`) explained an earlier, sharper version of this collapse but didn't fully prevent this milder recurrence, so the walk+reach curriculum coupling itself is the suspect: `EvalCallback`'s fixed, easy eval task (`cmd=(0.5,0,0)`, near reach target) never exercises the hard end of the training distribution, so `best_model.zip` only ever reflects the easy-task peak, not whether the network is retaining it under the full curriculum. `training/logs/mujoco/checkpoints/vecnorm_1200000_steps.pkl` is the matching VecNormalize stats for that peak checkpoint if resuming from it directly. Untouched so far: decoupling the walk and reach curriculum schedules, or capping how far `curriculum_level` climbs.
 
 ```bash
 # Auto-detect vecnorm stats from the same directory as the model
@@ -801,6 +813,7 @@ What's actually worth doing next, in priority order:
 3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Root-caused and fixed, untested in sim.** `leg_phases` was initialized from `Gait.STAND`'s `phase_offsets` (`[0,0,0,0]`) and then advanced every tick by the *same* scalar increment applied to all four elements — so all four legs stayed perfectly in phase forever, and every non-STAND gait's `phase_offsets` (e.g. WALK's `[0, 0.5, 0.25, 0.75]`) were computed but never actually applied per leg. All four feet swung simultaneously during the non-duty fraction of each cycle, dropping the body with zero ground support and tripping `stand_go2_gz.py`'s fall-detector. Fixed in `scripts/stand_go2_gz.py`, `scripts/teleop_go2_gz.py`, `scripts/cmd_vel_go2_gz.py`, and `training/headless_control.py` (all four had the same duplicated bug): now a scalar cycle phase advances each tick, and the active gait's `phase_offsets` are added back in per leg before computing foot targets. Verified via a standalone phase-accumulation check that legs now stagger correctly for WALK — not yet verified against a live Gazebo run.
 4. ~~Evaluate the new multi-terrain RL pipeline.~~ **Evaluated — no meaningful blind/sighted gap found.** Both `train_vision_compare.py` runs (200k steps each) finished; regenerated `blind_vs_sighted.png` from their `evaluations.npz`. Final eval mean reward: blind `305.7`, sighted `307.8` — within noise of each other, so the height-scan observation isn't yet producing the expected rough-terrain advantage. Worth a longer run or a harder terrain curriculum before drawing conclusions either way.
 5. **Wire the [manipulator arm](#manipulator-arm) into something that does work.** It's mounted and visually verified but purely decorative right now — no RL task, no IK, no quad_sdk/CHAMP awareness of the extra mass and links.
+6. ~~Wire the arm into the MuJoCo RL policy; fix the native-Gazebo RL reward.~~ **Arm wired into MuJoCo RL (19-DOF, 76-dim obs, walk+reach reward); Gazebo RL reward bug fixed; both need more training/verification.** `go2_mujoco_env.py` now trains a combined walk+arm-reach policy — this is a separate objective from item 5's IK-based arm, and unrelated to item 3's IK-trot gait-phase fix. Along the way: (a) `train_mujoco.py` only wrote `curriculum_level.txt` at clean exit, so an interrupted run (crash/OOM/preemption) would resume with a stale curriculum against an already-advanced checkpoint — now saved every 50k steps alongside the VecNormalize checkpoint; (b) `PPO()` had no `target_kl`, and training logs showed `approx_kl` climbing 0.017→0.10 and `clip_fraction` 0.2→0.6 unbounded over 3M steps while eval reward collapsed from a peak of 458 to ~120 and never recovered — `target_kl=0.03` (fresh and resumed runs) softened but didn't fully fix this, see the "Known issue (active)" under [Play Trained Policy](#play-trained-policy-opencv-viewer) for the current, milder recurrence tied to the walk+reach curriculum coupling; (c) separately, `Go2GazeboEnv`'s RL reward compared angular roll-rate against the linear-speed command (never rewarded actual translation) and reused the pre-fix `>0.5` tilt threshold — both fixed, see the Gazebo backend section above; (d) `train_gazebo.py`'s `EvalCallback` was evaluating on the exact same live env instance PPO trained on, corrupting in-progress rollouts every 10k steps — removed, no substitute eval env exists yet since Gazebo isn't cheaply parallelizable like MuJoCo. No Gazebo-backend RL checkpoint has been trained against these fixes yet.
 
 ---
 

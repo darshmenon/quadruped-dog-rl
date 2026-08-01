@@ -23,7 +23,7 @@ sys.modules.setdefault("triton", None)
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 from envs.go2_gazebo_env import Go2GazeboEnv
 
@@ -49,11 +49,17 @@ def main():
 
     env = Monitor(Go2GazeboEnv(cmd=cmd, auto_launch=not args.no_launch))
 
+    # No EvalCallback here: unlike the MuJoCo backend, Go2GazeboEnv wraps one
+    # live Gazebo sim reached over global ROS2 topics (/joint_states, /odom,
+    # ...), not a cheap in-process physics object -- there's no separate env
+    # to evaluate on without launching a second Gazebo instance fighting the
+    # first over the same topic names. Pointing EvalCallback at the same env
+    # PPO is training on made it reset/step that env out from under the
+    # rollout collector mid-episode every eval_freq steps, corrupting
+    # whatever rollout was in progress. Rely on periodic checkpoints instead
+    # and evaluate saved checkpoints out-of-band.
     callbacks = [
         CheckpointCallback(save_freq=10_000, save_path=CKPT_DIR, name_prefix="go2_gazebo"),
-        EvalCallback(env, best_model_save_path=LOG_DIR,
-                     log_path=LOG_DIR, eval_freq=10_000,
-                     n_eval_episodes=3, deterministic=True, render=False),
     ]
 
     if args.resume:

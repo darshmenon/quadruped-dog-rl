@@ -20,6 +20,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import JointState, Imu
+    from nav_msgs.msg import Odometry
     from std_msgs.msg import Float64
     from std_srvs.srv import Empty
     HAS_ROS = True
@@ -57,6 +58,7 @@ class _Go2RosNode(Node):
         self.joint_vel = np.zeros(12, dtype=np.float32)
         self.ang_vel = np.zeros(3, dtype=np.float32)
         self.orientation = np.array([1., 0., 0., 0.], dtype=np.float32)  # w,x,y,z
+        self.lin_vel = np.zeros(3, dtype=np.float32)
         self._lock = threading.Lock()
         self._joint_order = None
 
@@ -64,6 +66,13 @@ class _Go2RosNode(Node):
             JointState, "/joint_states", self._js_cb, qos)
         self.sub_imu = self.create_subscription(
             Imu, "/imu/data", self._imu_cb, qos)
+        # base-frame linear velocity, published by scripts/gz_pose_to_odom.py
+        # (finite-differenced from ground-truth Gazebo pose); step()'s reward
+        # previously had nothing to compare cmd[0]/cmd[1] (linear velocity)
+        # against and used ang_vel[0] instead, which rewards roll rate, not
+        # forward progress.
+        self.sub_odom = self.create_subscription(
+            Odometry, "/odom", self._odom_cb, qos)
 
         # per-joint position publishers (Float64 → gz JointPositionController)
         self._joint_pubs = {
@@ -90,6 +99,11 @@ class _Go2RosNode(Node):
             av = msg.angular_velocity
             self.ang_vel[:] = [av.x, av.y, av.z]
 
+    def _odom_cb(self, msg):
+        with self._lock:
+            lv = msg.twist.twist.linear
+            self.lin_vel[:] = [lv.x, lv.y, lv.z]
+
     def send_action(self, target_pos):
         for i, name in enumerate(CHAMP_JOINTS):
             msg = Float64()
@@ -110,6 +124,10 @@ class _Go2RosNode(Node):
                 self.joint_pos.copy(),
                 self.joint_vel.copy(),
             )
+
+    def get_lin_vel(self):
+        with self._lock:
+            return self.lin_vel.copy()
 
 
 class Go2GazeboEnv(gym.Env):
@@ -183,8 +201,12 @@ class Go2GazeboEnv(gym.Env):
     def _is_terminated(self):
         _, quat, _, _ = self._node.get_obs_data()
         w, x, y, z = quat
+        # -cos(tilt); see go2_mujoco_env.py's _is_terminated for the identity
+        # derivation. -0.5 is ~60 deg -- the old `> 0.5` threshold here only
+        # tripped past 120 deg, the same stale-threshold bug already fixed
+        # for the MuJoCo backend but never ported to this one.
         gravity_z = 1 - 2 * (w * w + z * z)
-        return gravity_z > 0.5   # ~60 deg tilt = fallen
+        return gravity_z > -0.5
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -205,8 +227,15 @@ class Go2GazeboEnv(gym.Env):
 
         obs = self._build_obs()
         ang_vel, quat, _, _ = self._node.get_obs_data()
+        lin_vel = self._node.get_lin_vel()
 
-        r_lin = float(np.exp(-((ang_vel[0] - self.cmd[0])**2) / 0.25))
+        # was comparing ang_vel[0] (roll rate) against cmd[0] (linear speed
+        # target) -- rewarded matching roll rate to a forward-speed number,
+        # never actual forward progress, which is the root cause of the
+        # README's documented "forward walking trips the fall-detector
+        # instead of translating" issue: nothing in the reward ever asked
+        # for translation.
+        r_lin = float(np.exp(-((lin_vel[0] - self.cmd[0])**2 + (lin_vel[1] - self.cmd[1])**2) / 0.25))
         r_ang = float(np.exp(-((ang_vel[2] - self.cmd[2])**2) / 0.25))
         reward = r_lin + 0.5 * r_ang
 
