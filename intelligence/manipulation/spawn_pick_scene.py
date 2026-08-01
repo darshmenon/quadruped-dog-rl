@@ -33,7 +33,7 @@ ARM_BASE_WORLD_OFFSET = (0.08, 0.0, 0.057)
 # GRASP waypoint so the cylinder is actually where the gripper closes.
 CYLINDER_ARM_FRAME = (0.42, 0.0, 0.0)
 
-TABLE_SIZE = (0.15, 0.15, 0.034)  # x, y, z (m)
+TABLE_SIZE = (0.35, 0.35, 0.034)  # x, y, z (m)
 CYLINDER_RADIUS = 0.018  # m -- fits within the gripper's 0.05m max opening
 CYLINDER_LENGTH = 0.08   # m
 CYLINDER_MASS = 0.05     # kg
@@ -135,9 +135,15 @@ def main():
     parser.add_argument("--world", default="go2_rl", help="Gazebo world name")
     args = parser.parse_args()
 
-    table_world_pos = arm_to_world(CYLINDER_ARM_FRAME[0], CYLINDER_ARM_FRAME[1],
-                                    -TABLE_SIZE[2] / 2.0)
     cylinder_world_pos = arm_to_world(*CYLINDER_ARM_FRAME)
+    # Table top must sit CYLINDER_LENGTH/2 below the cylinder's center so the
+    # cylinder rests on top of it (bottom flush with the table surface),
+    # not table-top == cylinder-center (which buries half the cylinder
+    # inside the table and lets contact resolution slowly eject it --
+    # exactly the "floating" drift seen before this was fixed).
+    table_top_z = cylinder_world_pos[2] - CYLINDER_LENGTH / 2.0
+    table_center_z = table_top_z - TABLE_SIZE[2] / 2.0
+    table_world_pos = (cylinder_world_pos[0], cylinder_world_pos[1], table_center_z)
 
     print(f"[spawn_pick_scene] cylinder target arm-frame={CYLINDER_ARM_FRAME}, "
           f"table_world={table_world_pos}, cylinder_world={cylinder_world_pos}")

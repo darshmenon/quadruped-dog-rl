@@ -84,6 +84,22 @@ for plugin in list(model.findall("plugin")):
     if plugin.get("name") == CONTROLLER_PLUGIN:
         model.remove(plugin)
 
+# right_finger_joint's URDF <mimic> survives `gz sdf -p`'s URDF->SDF
+# conversion into an <axis><mimic> block, even though the physics engine
+# here can't honor it (startup log: "physics engine does not support mimic
+# constraints, so no constraint will be created" -- right_finger_joint is
+# driven independently by its own JointPositionController instead, see
+# intelligence/manipulation/arm_reach_node.py). Empirically, leaving that
+# dead <mimic> tag in place makes the JointPositionController fail to
+# actually track its target for that joint (it gets stuck near its open
+# limit instead of closing) -- stripping the tag fixes it.
+for joint in model.findall("joint"):
+    axis = joint.find("axis")
+    if axis is not None:
+        mimic = axis.find("mimic")
+        if mimic is not None:
+            axis.remove(mimic)
+
 
 def ensure_child(parent, tag):
     child = parent.find(tag)
@@ -122,6 +138,26 @@ for link in model.findall("link"):
         if is_foot_link or is_lumped_foot:
             tune_collision_surface(collision)
 
+# left_finger/right_finger (ros2/champ_description/urdf/arm.urdf.xacro) both
+# have their prismatic joint's zero position at the same local (x=0.04,y=0)
+# offset from gripper_base, so at anything near a "closed" commanded target
+# their collision boxes are driving toward fully overlapping -- causing them
+# to jam against EACH OTHER rather than an actual grasped object (confirmed
+# empirically: with nothing between them, gripper close always stalls a few
+# mm short, symmetric with an object absent or present). Distinct
+# collide_bitmasks that share no bits disable finger-vs-finger collision
+# while leaving each finger's default (all-bits) mask for colliding with
+# everything else, so they can still grip a real object between them.
+FINGER_COLLIDE_BITMASKS = {"left_finger": "0x01", "right_finger": "0x02"}
+for link in model.findall("link"):
+    bitmask = FINGER_COLLIDE_BITMASKS.get(link.get("name"))
+    if bitmask is None:
+        continue
+    for collision in link.findall("collision"):
+        surface = ensure_child(collision, "surface")
+        contact = ensure_child(surface, "contact")
+        set_text(contact, "collide_bitmask", bitmask)
+
 # Add initial_position to each joint axis
 for joint in model.findall("joint"):
     jname = joint.get("name")
@@ -147,6 +183,16 @@ for jname, angle in STANDING_POSE.items():
     ET.SubElement(plugin, "cmd_min").text = "-120"
     ET.SubElement(plugin, "target").text = str(angle)
     ET.SubElement(plugin, "use_velocity_commands").text = "false"
+
+# NOT adding gz::sim::systems::JointStatePublisher here: it would fix
+# /joint_states never publishing (see arm_reach_node.py's docstring on the
+# TF/joint-feedback gap), but empirically it causes a real leg-joint
+# resonance with the JointPositionController plugins above -- e.g. FL_hip
+# oscillating ~0.07 rad every ~1ms once it's added, confirmed stable again
+# (rock-solid across repeated pose samples) once removed. A shaking robot is
+# worse than missing joint feedback, so this stays off until that's root
+# caused (possibly plugin publish-rate tuning, or an update-loop ordering
+# issue between the two systems).
 
 imu_link = model.find("link[@name='imu']")
 if imu_link is None:
