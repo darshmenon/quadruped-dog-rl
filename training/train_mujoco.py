@@ -152,21 +152,38 @@ def main():
     eval_env = VecNormalize(DummyVecEnv([lambda: eval_raw]),
                             norm_obs=True, norm_reward=False, training=False)
 
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=LOG_DIR,
+        log_path=LOG_DIR,
+        eval_freq=50_000,
+        n_eval_episodes=5,
+        deterministic=True,
+        render=False,
+    )
+    # EvalCallback always starts best_mean_reward=-inf, with no memory of a
+    # previous run's actual best -- on --resume, its first eval was treated
+    # as "new best" regardless of how it compared, silently overwriting
+    # best_model.zip. This clobbered a real 462.97-reward checkpoint with a
+    # transient 181 mid-resume (only recoverable because CheckpointCallback
+    # happened to also save that same step as a numbered checkpoint). Seed
+    # it from the previous run's own evaluations.npz so only a genuine
+    # improvement can overwrite the saved checkpoint.
+    prev_evals_path = os.path.join(LOG_DIR, "evaluations.npz")
+    if os.path.exists(prev_evals_path):
+        prev_evals = np.load(prev_evals_path)
+        if len(prev_evals["results"]) > 0:
+            eval_callback.best_mean_reward = float(np.mean(prev_evals["results"], axis=1).max())
+            print(f"Seeded EvalCallback.best_mean_reward="
+                  f"{eval_callback.best_mean_reward:.2f} from {prev_evals_path}")
+
     callbacks = [
         RewardComponentCallback(log_interval=1000),
         CheckpointCallback(save_freq=50_000, save_path=CKPT_DIR,
                            name_prefix="go2_mujoco"),
         VecNormSaveCallback(vec_env, CKPT_DIR, save_freq=50_000,
                             curriculum_path=CURRICULUM_PATH),
-        EvalCallback(
-            eval_env,
-            best_model_save_path=LOG_DIR,
-            log_path=LOG_DIR,
-            eval_freq=50_000,
-            n_eval_episodes=5,
-            deterministic=True,
-            render=False,
-        ),
+        eval_callback,
     ]
 
     if args.resume:
