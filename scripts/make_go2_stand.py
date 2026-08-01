@@ -41,6 +41,11 @@ STANDING_POSE = {
     "upper_arm_joint":  0.8,
     "wrist1_joint":     0.3,
     "wrist2_joint":     0.0,
+    # Gripper closed by default (see ros2/champ_description/urdf/arm.urdf.xacro:
+    # 0.0 = closed, 0.025 = fully open for left_finger_joint, mirrored for
+    # right_finger_joint since its <mimic> isn't enforced by this sim path).
+    "left_finger_joint":  0.0,
+    "right_finger_joint": 0.0,
 }
 
 FOOT_LINKS = {"FL_foot", "FR_foot", "RL_foot", "RR_foot"}
@@ -59,6 +64,12 @@ if result.returncode != 0:
     sys.exit(1)
 
 sdf_text = result.stdout
+
+# go2_gz.urdf.xacro can't use $(find training) to locate go2_ros2_control.yaml
+# (training/ has no package.xml, so that's unresolvable within this repo) --
+# it bakes in a __REPO_ROOT__ placeholder instead, resolved here to wherever
+# this checkout actually lives.
+sdf_text = sdf_text.replace("__REPO_ROOT__", REPO)
 
 # Parse and modify SDF
 ET.register_namespace("", "")

@@ -26,12 +26,14 @@ STAND_SDF = Path(tempfile.gettempdir()) / "go2_stand.sdf"
 STAND_SDF_SCRIPT = REPO / "scripts" / "make_go2_stand.py"
 STAND_NODE = REPO / "scripts" / "stand_go2_gz.py"
 ODOM_NODE = REPO / "scripts" / "gz_pose_to_odom.py"
+ARM_REACH_NODE = REPO / "intelligence" / "manipulation" / "arm_reach_node.py"
 
 
 def generate_launch_description():
     headless_arg = DeclareLaunchArgument("headless", default_value="false")
     world_arg = DeclareLaunchArgument("world", default_value=str(DEFAULT_WORLD))
     stand_duration_arg = DeclareLaunchArgument("stand_duration", default_value="-1.0")
+    enable_arm_reach_arg = DeclareLaunchArgument("enable_arm_reach", default_value="false")
 
     # go2_gz.urdf's manipulator arm links (see
     # ros2/champ_description/urdf/arm.urdf.xacro) use package://champ_description
@@ -51,6 +53,7 @@ def generate_launch_description():
         headless_arg,
         world_arg,
         stand_duration_arg,
+        enable_arm_reach_arg,
         gz_resource_path,
         OpaqueFunction(function=_launch_setup),
     ])
@@ -60,6 +63,7 @@ def _launch_setup(context, *args, **kwargs):
     headless = LaunchConfiguration("headless").perform(context).lower() == "true"
     world = LaunchConfiguration("world").perform(context)
     stand_duration = LaunchConfiguration("stand_duration").perform(context)
+    enable_arm_reach = LaunchConfiguration("enable_arm_reach").perform(context).lower() == "true"
     gz_args = f"{'-s ' if headless else ''}{world}"
     subprocess.run([
         "python3",
@@ -110,6 +114,18 @@ def _launch_setup(context, *args, **kwargs):
         "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
         "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
     ]
+    # make_go2_stand.py adds a native JointPositionController (topic
+    # /go2/cmd/<joint>) for every joint in STANDING_POSE, arm included -- but
+    # until now only the leg joints were bridged to ROS2, so the arm had no
+    # way to be commanded at runtime.
+    arm_joint_names = [
+        "base_joint", "lower_arm_joint", "upper_arm_joint",
+        "wrist1_joint", "wrist2_joint",
+        # Both bridged independently -- the URDF's right_finger_joint <mimic>
+        # tag isn't enforced by gz sdf -p's URDF->SDF conversion, see
+        # ros2/champ_description/urdf/arm.urdf.xacro.
+        "left_finger_joint", "right_finger_joint",
+    ]
 
     bridge_args = [
         "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
@@ -118,7 +134,7 @@ def _launch_setup(context, *args, **kwargs):
         "/world/go2_rl/model/go2/joint_state@sensor_msgs/msg/JointState[gz.msgs.Model",
     ]
     # per-joint position command bridges: ROS2 Float64 → Gazebo Double
-    for jname in joint_names:
+    for jname in joint_names + arm_joint_names:
         bridge_args.append(f"/go2/cmd/{jname}@std_msgs/msg/Float64]gz.msgs.Double")
 
     bridge = Node(
@@ -155,7 +171,7 @@ def _launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    return [
+    actions = [
         gz_sim,
         robot_state_pub,
         # Delay spawn past world load: the multi-terrain world has ~65 extra
@@ -172,3 +188,11 @@ def _launch_setup(context, *args, **kwargs):
         TimerAction(period=9.0, actions=[odom]),
         TimerAction(period=9.0, actions=[stand]),
     ]
+
+    if enable_arm_reach:
+        arm_reach = ExecuteProcess(cmd=["python3", str(ARM_REACH_NODE)], output="screen")
+        # Start after `stand` (period=9.0) has issued its own arm command
+        # (STOW_POSE) so arm_reach_node's first /arm/target message wins.
+        actions.append(TimerAction(period=11.0, actions=[arm_reach]))
+
+    return actions

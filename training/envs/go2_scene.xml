@@ -107,6 +107,50 @@
         </body>
       </body>
 
+      <!-- 5-DOF arm + 2-finger gripper, mirroring
+           ros2/champ_description/urdf/arm.urdf.xacro and matching
+           intelligence/manipulation/arm_ik.py's geometry constants exactly
+           (shoulder height 0.035, upper/forearm 0.195 each, wrist 0.065,
+           gripper 0.015+0.04). Must stay the LAST child of "base": its 7
+           joints append after the 12 leg joints in qpos/qvel, and
+           go2_mujoco_env.py indexes those arrays positionally by count, not
+           by name, so reordering this block would silently scramble which
+           action index drives which joint. -->
+      <body name="arm_base" pos="0.08 0 0.057">
+        <joint name="base_joint" type="hinge" axis="0 0 1" range="-1.5708 1.5708" damping="0.2" armature="0.005"/>
+        <geom type="box" size="0.02 0.02 0.02" mass="0.15" rgba="0.15 0.15 0.15 1"/>
+        <body name="lower_arm" pos="0 0 0.035">
+          <joint name="lower_arm_joint" type="hinge" axis="0 1 0" range="-1.5708 1.5708" damping="0.2" armature="0.005"/>
+          <geom type="capsule" fromto="0 0 0 0.195 0 0" size="0.02" mass="0.1" rgba="0.15 0.15 0.15 1"/>
+          <body name="upper_arm" pos="0.195 0 0">
+            <joint name="upper_arm_joint" type="hinge" axis="0 1 0" range="-1.5708 1.5708" damping="0.2" armature="0.005"/>
+            <geom type="capsule" fromto="0 0 0 0.195 0 0" size="0.02" mass="0.1" rgba="0.15 0.15 0.15 1"/>
+            <body name="wrist1" pos="0.195 0 0">
+              <joint name="wrist1_joint" type="hinge" axis="0 1 0" range="-1.5708 1.5708" damping="0.1" armature="0.003"/>
+              <geom type="capsule" fromto="0 0 0 0.065 0 0" size="0.018" mass="0.05" rgba="0.15 0.15 0.15 1"/>
+              <body name="wrist2" pos="0.065 0 0">
+                <joint name="wrist2_joint" type="hinge" axis="1 0 0" range="-1.5708 1.5708" damping="0.1" armature="0.003"/>
+                <geom type="box" size="0.015 0.015 0.015" mass="0.05" rgba="0.15 0.15 0.15 1"/>
+                <body name="gripper_base" pos="0.015 0 0">
+                  <geom type="box" size="0.01 0.025 0.01" mass="0.03" rgba="0.15 0.15 0.15 1"/>
+                  <!-- fingertip centerline, matches arm_ik.py's GRIPPER_LENGTH
+                       endpoint (0.015 + 0.04 past wrist2_joint) exactly. -->
+                  <site name="ee_site" pos="0.04 0 0" size="0.005"/>
+                  <body name="left_finger" pos="0.04 0 0">
+                    <joint name="left_finger_joint" type="slide" axis="0 1 0" range="0 0.025" damping="0.05" armature="0.001"/>
+                    <geom type="box" size="0.015 0.004 0.0075" mass="0.01" rgba="0.15 0.15 0.15 1"/>
+                  </body>
+                  <body name="right_finger" pos="0.04 0 0">
+                    <joint name="right_finger_joint" type="slide" axis="0 1 0" range="-0.025 0" damping="0.05" armature="0.001"/>
+                    <geom type="box" size="0.015 0.004 0.0075" mass="0.01" rgba="0.15 0.15 0.15 1"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+
     </body>
   </worldbody>
 
@@ -126,6 +170,16 @@
     <position name="FR_calf"  joint="FR_calf_joint"  kp="20" kv="0.5" ctrlrange="-2.7227 -0.83776"/>
     <position name="RL_calf"  joint="RL_calf_joint"  kp="20" kv="0.5" ctrlrange="-2.7227 -0.83776"/>
     <position name="RR_calf"  joint="RR_calf_joint"  kp="20" kv="0.5" ctrlrange="-2.7227 -0.83776"/>
+    <!-- Arm + gripper actuators, lighter gains than the legs (25 N*m effort
+         arm joints, 10 N*m fingers per arm.urdf.xacro vs. the legs' much
+         heavier drive requirements). -->
+    <position name="base_joint"         joint="base_joint"         kp="15" kv="0.3"  ctrlrange="-1.5708 1.5708"/>
+    <position name="lower_arm_joint"    joint="lower_arm_joint"    kp="15" kv="0.3"  ctrlrange="-1.5708 1.5708"/>
+    <position name="upper_arm_joint"    joint="upper_arm_joint"    kp="15" kv="0.3"  ctrlrange="-1.5708 1.5708"/>
+    <position name="wrist1_joint"       joint="wrist1_joint"       kp="10" kv="0.2"  ctrlrange="-1.5708 1.5708"/>
+    <position name="wrist2_joint"       joint="wrist2_joint"       kp="10" kv="0.2"  ctrlrange="-1.5708 1.5708"/>
+    <position name="left_finger_joint"  joint="left_finger_joint"  kp="5"  kv="0.05" ctrlrange="0 0.025"/>
+    <position name="right_finger_joint" joint="right_finger_joint" kp="5"  kv="0.05" ctrlrange="-0.025 0"/>
   </actuator>
 
   <sensor>
@@ -160,6 +214,24 @@
     <touch name="FR_contact" site="FR_foot_site"/>
     <touch name="RL_contact" site="RL_foot_site"/>
     <touch name="RR_contact" site="RR_foot_site"/>
+    <jointpos name="base_joint_pos"         joint="base_joint"/>
+    <jointpos name="lower_arm_joint_pos"    joint="lower_arm_joint"/>
+    <jointpos name="upper_arm_joint_pos"    joint="upper_arm_joint"/>
+    <jointpos name="wrist1_joint_pos"       joint="wrist1_joint"/>
+    <jointpos name="wrist2_joint_pos"       joint="wrist2_joint"/>
+    <jointpos name="left_finger_joint_pos"  joint="left_finger_joint"/>
+    <jointpos name="right_finger_joint_pos" joint="right_finger_joint"/>
+    <jointvel name="base_joint_vel"         joint="base_joint"/>
+    <jointvel name="lower_arm_joint_vel"    joint="lower_arm_joint"/>
+    <jointvel name="upper_arm_joint_vel"    joint="upper_arm_joint"/>
+    <jointvel name="wrist1_joint_vel"       joint="wrist1_joint"/>
+    <jointvel name="wrist2_joint_vel"       joint="wrist2_joint"/>
+    <jointvel name="left_finger_joint_vel"  joint="left_finger_joint"/>
+    <jointvel name="right_finger_joint_vel" joint="right_finger_joint"/>
+    <!-- Gripper fingertip centerline position, relative to the body frame
+         (not arm_ik.py's base_mount frame, which is this plus a fixed
+         0.08/0/0.057 translation, see arm_base's pos above). -->
+    <framepos name="ee_pos" objtype="site" objname="ee_site" reftype="body" refname="base"/>
   </sensor>
 
 </mujoco>

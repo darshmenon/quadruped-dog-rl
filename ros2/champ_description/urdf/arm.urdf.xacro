@@ -2,9 +2,20 @@
 <!--
   5-DOF manipulator arm, extracted from the flat champ_arm.urdf dump (CHAMP's
   stock demo arm: base_joint/lower_arm_joint/upper_arm_joint/wrist1_joint/
-  wrist2_joint, no gripper) into a reusable macro so it can be mounted on any
-  robot base link instead of only the generic champ_description/champ.urdf
-  robot it originally shipped hardcoded into.
+  wrist2_joint) into a reusable macro so it can be mounted on any robot base
+  link instead of only the generic champ_description/champ.urdf robot it
+  originally shipped hardcoded into.
+
+  A simple 2-finger parallel gripper is bolted onto wrist2 below (no STL for
+  it in champ_description/meshes/arm, since CHAMP's stock arm never had one,
+  so it's box primitives instead of a mesh). left_finger_joint is the one
+  driven directly; right_finger_joint carries a <mimic> of it (multiplier
+  -1) for URDF-spec consumers (robot_state_publisher/RViz/MoveIt), but see
+  the caveat on right_finger_joint below: that constraint is NOT enforced in
+  this repo's actual Gazebo control path, so right_finger_joint also gets
+  its own native command topic and must be driven in lockstep with
+  left_finger_joint by whatever commands the gripper (see
+  intelligence/manipulation/arm_reach_node.py).
 -->
 <robot xmlns:xacro="http://ros.org/wiki/xacro">
 
@@ -161,6 +172,100 @@
       <parent link="wrist1"/>
       <child link="wrist2"/>
       <origin rpy="0 0 0" xyz="0.065 0 0"/>
+    </joint>
+
+    <!-- Parallel gripper. wrist2_to_gripper_joint is fixed, so it just adds
+         a rigid offset to the end effector, kept in sync with
+         intelligence/manipulation/arm_ik.py's GRIPPER_LENGTH constant
+         (wrist2_joint -> fingertip centerline distance = 0.015 + 0.04). -->
+    <link name="gripper_base">
+      <inertial>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <mass value="0.03"/>
+        <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+      </inertial>
+      <collision>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.02 0.05 0.02"/>
+        </geometry>
+      </collision>
+      <visual>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.02 0.05 0.02"/>
+        </geometry>
+        <material name="black"/>
+      </visual>
+    </link>
+    <joint name="wrist2_to_gripper_joint" type="fixed">
+      <parent link="wrist2"/>
+      <child link="gripper_base"/>
+      <origin rpy="0 0 0" xyz="0.015 0 0"/>
+    </joint>
+
+    <!-- Fingers slide along +/-y from the centerline: joint value 0 = closed,
+         0.025 = fully open (5cm max gap between finger inner faces). -->
+    <link name="left_finger">
+      <inertial>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <mass value="0.01"/>
+        <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+      </inertial>
+      <collision>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.03 0.008 0.015"/>
+        </geometry>
+      </collision>
+      <visual>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.03 0.008 0.015"/>
+        </geometry>
+        <material name="black"/>
+      </visual>
+    </link>
+    <joint name="left_finger_joint" type="prismatic">
+      <axis xyz="0 1 0"/>
+      <limit effort="10" lower="0.0" upper="0.025" velocity="0.5"/>
+      <parent link="gripper_base"/>
+      <child link="left_finger"/>
+      <origin rpy="0 0 0" xyz="0.04 0 0"/>
+    </joint>
+
+    <link name="right_finger">
+      <inertial>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <mass value="0.01"/>
+        <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+      </inertial>
+      <collision>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.03 0.008 0.015"/>
+        </geometry>
+      </collision>
+      <visual>
+        <origin rpy="0 0 0" xyz="0 0 0"/>
+        <geometry>
+          <box size="0.03 0.008 0.015"/>
+        </geometry>
+        <material name="black"/>
+      </visual>
+    </link>
+    <!-- multiplier=-1: right_finger mirrors left_finger's slide so the two
+         close/open symmetrically about the centerline. Not enforced by this
+         repo's Gazebo control path (gz sdf -p's URDF->SDF conversion does
+         not carry <mimic> through), so it's driven directly instead, see
+         the macro-level comment above. -->
+    <joint name="right_finger_joint" type="prismatic">
+      <axis xyz="0 1 0"/>
+      <limit effort="10" lower="-0.025" upper="0.0" velocity="0.5"/>
+      <parent link="gripper_base"/>
+      <child link="right_finger"/>
+      <origin rpy="0 0 0" xyz="0.04 0 0"/>
+      <mimic joint="left_finger_joint" multiplier="-1" offset="0"/>
     </joint>
   </xacro:macro>
 </robot>

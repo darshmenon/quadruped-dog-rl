@@ -8,6 +8,13 @@ import mujoco
 
 SCENE_XML = os.path.join(os.path.dirname(__file__), "go2_scene.xml")
 
+# Arm+gripper stow pose, matches scripts/make_go2_stand.py STANDING_POSE /
+# intelligence/manipulation/arm_reach_node.py STOW_POSE (gripper closed).
+ARM_STOW = [0.0, 1.4, 0.8, 0.3, 0.0, 0.0, 0.0]  # base, lower_arm, upper_arm, wrist1, wrist2, L/R finger
+
+# qpos/qvel order follows go2_scene.xml's body tree (depth-first): the 4 legs
+# leg-by-leg, then the arm+gripper chain appended last (see that file's
+# comment on why it must stay last).
 DEFAULT_QPOS = np.array([
     0.1,   # FL_hip
     0.8,   # FL_thigh
@@ -21,19 +28,25 @@ DEFAULT_QPOS = np.array([
     -0.1,  # RR_hip
     1.0,   # RR_thigh
     -1.5,  # RR_calf
-], dtype=np.float32)
+] + ARM_STOW, dtype=np.float32)
 
-# Actuator order: [FL_hip, FR_hip, RL_hip, RR_hip,
-#                  FL_thigh, FR_thigh, RL_thigh, RR_thigh,
-#                  FL_calf, FR_calf, RL_calf, RR_calf]
+# Actuator order (independent of qpos order -- set by <actuator> declaration
+# order in go2_scene.xml): [FL_hip, FR_hip, RL_hip, RR_hip,
+#                            FL_thigh, FR_thigh, RL_thigh, RR_thigh,
+#                            FL_calf, FR_calf, RL_calf, RR_calf,
+#                            base, lower_arm, upper_arm, wrist1, wrist2, L/R finger]
+# The arm+gripper segment happens to match DEFAULT_QPOS's order too, since
+# (unlike the 4 parallel legs) it's a single serial chain declared once.
 ACT_DEFAULT = np.array([
     0.1, -0.1,  0.1, -0.1,
     0.8,  0.8,  1.0,  1.0,
    -1.5, -1.5, -1.5, -1.5,
-], dtype=np.float32)
+] + ARM_STOW, dtype=np.float32)
 
-OBS_DIM = 49   # 3 ang_vel + 3 gravity + 3 cmd + 12 dof_pos + 12 dof_vel + 12 prev_action + 4 contacts
-ACT_DIM = 12
+# 3 ang_vel + 3 gravity + 3 cmd + 19 dof_pos + 19 dof_vel + 19 prev_action
+# + 4 contacts + 3 ee_pos + 3 reach_target
+OBS_DIM = 76
+ACT_DIM = 19
 ACT_SCALE = 0.25
 
 EPISODE_LEN_S = 20.0
@@ -46,13 +59,28 @@ ALIVE_BONUS  = 0.3    # per-step credit for still standing, so ending an
                        # episode early is never a shortcut to avoid penalties
 FALL_PENALTY = -8.0    # one-time hit applied on the step that trips termination
 
+# arm_base's pos= in go2_scene.xml, i.e. where the arm mounts relative to the
+# "base" body -- reach targets are sampled around this point, in the same
+# frame as the ee_pos sensor.
+ARM_MOUNT_POS = np.array([0.08, 0.0, 0.057], dtype=np.float32)
+
+REACH_MIN_RADIUS = 0.12   # closest a target is ever placed from the mount point
+REACH_MAX_RADIUS_EASY = 0.22  # max radius at curriculum_level=0
+REACH_MAX_RADIUS_HARD = 0.42  # max radius at curriculum_level=1 (< arm_ik.py's
+                               # ~0.51 structural max, so targets stay solvable
+                               # across the yaw/elevation range sampled below)
+REACH_SUCCESS_DIST = 0.05  # fingertip-to-target distance counted as "reached"
+REACH_SIGMA = 0.12         # width of the reach-distance reward kernel
+REACH_WEIGHT = 0.8
+REACH_SUCCESS_BONUS = 0.5
+
 
 class Go2MujocoEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(self, cmd=(0.5, 0.0, 0.0), render_mode=None,
                  randomize_domain=True, use_curriculum=True,
-                 initial_curriculum_level=0.0):
+                 initial_curriculum_level=0.0, reach_target=None):
         super().__init__()
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
         self.data = mujoco.MjData(self.model)
@@ -69,6 +97,15 @@ class Go2MujocoEnv(gym.Env):
         self._last_episode_steps = self._max_steps
 
         self.curriculum_level = float(initial_curriculum_level)
+        # Mirrors `cmd`: a fixed reach target for non-curriculum use (e.g.
+        # play_policy.py), resampled every reset when use_curriculum=True
+        # (see reset()). Default is a modest forward reach, not a random
+        # sample, so eval runs are reproducible unless the caller asks
+        # otherwise.
+        self.reach_target = (
+            np.array(reach_target, dtype=np.float32) if reach_target is not None
+            else ARM_MOUNT_POS + np.array([0.3, 0.0, 0.0], dtype=np.float32)
+        )
 
         # cache original model params for domain randomization
         self._base_body_id = mujoco.mj_name2id(
@@ -111,8 +148,15 @@ class Go2MujocoEnv(gym.Env):
         dof_pos   = (d.qpos[7:].astype(np.float32) - DEFAULT_QPOS)
         dof_vel   = d.qvel[6:].astype(np.float32) * 0.05
         contacts  = self._get_contacts()
+        # Gripper fingertip position and its current target, both relative
+        # to the base body (see go2_scene.xml's ee_pos sensor comment) --
+        # given as two absolute points rather than a precomputed error
+        # vector, matching how dof_pos/cmd are split into achieved vs.
+        # desired elsewhere in this observation.
+        ee_pos    = d.sensor("ee_pos").data.astype(np.float32)
         return np.concatenate(
-            [ang_vel, gravity, cmd_scaled, dof_pos, dof_vel, self._prev_action, contacts])
+            [ang_vel, gravity, cmd_scaled, dof_pos, dof_vel, self._prev_action,
+             contacts, ee_pos, self.reach_target])
 
     def _compute_reward(self, action: np.ndarray):
         d = self.data
@@ -132,6 +176,11 @@ class Go2MujocoEnv(gym.Env):
         contacts  = self._get_contacts()
         r_contact = 0.15 * min(float(np.sum(contacts > 0.3)) / 2.0, 1.0)
 
+        ee_pos = d.sensor("ee_pos").data.astype(np.float32)
+        reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
+        r_reach = REACH_WEIGHT * float(np.exp(-(reach_dist ** 2) / (REACH_SIGMA ** 2)))
+        r_reach_bonus = REACH_SUCCESS_BONUS if reach_dist < REACH_SUCCESS_DIST else 0.0
+
         # Explicit stall penalty: standing still while a real command is
         # active must never out-earn walking, no matter how forgiving the
         # tracking kernel above is (previously the policy converged to
@@ -144,6 +193,7 @@ class Go2MujocoEnv(gym.Env):
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
             stall=r_stall, alive=ALIVE_BONUS,
+            reach=r_reach, reach_bonus=r_reach_bonus,
         )
         return float(sum(components.values())), components
 
@@ -153,6 +203,32 @@ class Go2MujocoEnv(gym.Env):
         vy = float(self.np_random.uniform(-0.2, 0.2)) * self.curriculum_level
         wz = float(self.np_random.uniform(-0.5, 0.5)) * self.curriculum_level
         return np.array([vx, vy, wz], dtype=np.float32)
+
+    def _sample_reach_target(self) -> np.ndarray:
+        """Sample a reach target around ARM_MOUNT_POS, in the base body
+        frame. Radius range widens with curriculum_level (same level that
+        drives _sample_cmd's walking speed), so training starts with the
+        arm holding a near, easy point while standing close to still, and
+        only asks for farther reaches once the body is also walking faster
+        -- "standing and reaching" progressing to "reaching while walking",
+        both gated by the one curriculum_level rather than two independent
+        schedules that could drift out of sync.
+        """
+        max_radius = REACH_MAX_RADIUS_EASY + (
+            REACH_MAX_RADIUS_HARD - REACH_MAX_RADIUS_EASY) * self.curriculum_level
+        radius = float(self.np_random.uniform(REACH_MIN_RADIUS, max_radius))
+        # yaw within base_joint's own +/-90deg limit (arm.urdf.xacro), with
+        # margin so the shoulder/elbow aren't also pinned at their limits
+        # trying to hit the same point; elevation modestly above/below the
+        # mount plane.
+        yaw = float(self.np_random.uniform(-1.1, 1.1))
+        pitch = float(self.np_random.uniform(-0.5, 0.6))
+        direction = np.array([
+            np.cos(pitch) * np.cos(yaw),
+            np.cos(pitch) * np.sin(yaw),
+            np.sin(pitch),
+        ], dtype=np.float32)
+        return ARM_MOUNT_POS + radius * direction
 
     def _apply_domain_rand(self) -> None:
         if not self.randomize_domain:
@@ -189,13 +265,19 @@ class Go2MujocoEnv(gym.Env):
             self.curriculum_level = float(np.clip(
                 self.curriculum_level + (0.005 if success else -0.002), 0.0, 1.0))
             self.cmd = self._sample_cmd()
+            self.reach_target = self._sample_reach_target()
 
         mujoco.mj_resetData(self.model, self.data)
         self._apply_domain_rand()
 
         self.data.qpos[2]   = 0.42
         self.data.qpos[3:7] = [1, 0, 0, 0]
-        self.data.qpos[7:]  = DEFAULT_QPOS + (self.np_random.random(12) - 0.5) * 0.1
+        # Domain-randomize the leg joints only: the arm+gripper stow pose
+        # (DEFAULT_QPOS[12:]) starts exact, since the same +/-0.05 rad noise
+        # scale would swing the finger joints (0.025m full range) past their
+        # limits.
+        self.data.qpos[7:19] = DEFAULT_QPOS[:12] + (self.np_random.random(12) - 0.5) * 0.1
+        self.data.qpos[19:]  = DEFAULT_QPOS[12:]
         self.data.ctrl[:]   = self._act_default
         mujoco.mj_forward(self.model, self.data)
 

@@ -32,3 +32,5 @@ arm_position_controller:
       - upper_arm_joint
       - wrist1_joint
       - wrist2_joint
+      - left_finger_joint
+      - right_finger_joint

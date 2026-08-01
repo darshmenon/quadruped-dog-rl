@@ -12,11 +12,17 @@
     <origin rpy="0 0 0" xyz="0.08 0 0.057"/>
   </xacro:champ_arm>
 
-  <!-- Gazebo Harmonic gz_ros2_control plugin -->
+  <!-- Gazebo Harmonic gz_ros2_control plugin. training/ has no package.xml
+       (it's plain Python run via `python3 script.py`, not a ROS2 package),
+       so $(find training) can't resolve it: it previously fell through to
+       whatever other overlaid workspace happened to have a colcon package
+       literally named "training" and baked in that repo's install path.
+       __REPO_ROOT__ is resolved dynamically (to this checkout's actual path)
+       by scripts/make_go2_stand.py when it converts this file to SDF. -->
   <gazebo>
     <plugin filename="libgz_ros2_control-system.so"
             name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-      <parameters>$(find training)/config/go2_ros2_control.yaml</parameters>
+      <parameters>__REPO_ROOT__/training/config/go2_ros2_control.yaml</parameters>
     </plugin>
   </gazebo>
 
@@ -106,6 +112,19 @@
       <state_interface name="velocity"/>
     </joint>
     <joint name="wrist2_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <!-- Both fingers get independent command interfaces, see
+         ros2/champ_description/urdf/arm.urdf.xacro's macro-level comment on
+         why right_finger_joint's <mimic> isn't relied on here. -->
+    <joint name="left_finger_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_finger_joint">
       <command_interface name="position"/>
       <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
       <state_interface name="velocity"/>
