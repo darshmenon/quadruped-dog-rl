@@ -14,8 +14,10 @@ logs/
 *.pth
 
 # ROS2 build artifacts
+install/
 ros2/install/
 ros2/build/
+log/
 ros2/log/
 ros2/quad_sdk/robot_driver/log/latest
 ros2/quad_sdk/robot_driver/log/latest_list
