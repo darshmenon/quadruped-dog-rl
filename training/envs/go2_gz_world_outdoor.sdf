@@ -1,0 +1,79 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="go2_rl">
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Visual-only outdoor demo world for nav2/SLAM (not used by RL training,
+         which stays on the self-contained go2_gz_world.sdf / go2_multi_terrain.sdf
+         for reproducibility without a network dependency). Fetched once via
+         `gz fuel download`; these <uri> includes resolve from the local
+         ~/.gz/fuel cache from then on, no re-download needed. Plain meshes only
+         (no <heightmap>) -- Ogre2's heightmap shader fails to compile under this
+         environment's software/EGL rendering fallback (see
+         scripts/generate_rough_patch.py for the same constraint on the RL side). -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Grass Plane</uri>
+      <name>grass_plane</name>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Pine Tree</uri>
+      <name>pine_tree_1</name>
+      <pose>6 3 0 0 0 0.3</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Pine Tree</uri>
+      <name>pine_tree_2</name>
+      <pose>-5 6 0 0 0 1.1</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Pine Tree</uri>
+      <name>pine_tree_3</name>
+      <pose>-7 -4 0 0 0 2.4</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Oak tree</uri>
+      <name>oak_tree_1</name>
+      <pose>5 -6 0 0 0 0.8</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/Oak tree</uri>
+      <name>oak_tree_2</name>
+      <pose>-3 8 0 0 0 2.0</pose>
+    </include>
+
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/Cole/models/Ocean Rock 01</uri>
+      <name>rock_1</name>
+      <pose>3 -3 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/Cole/models/Ocean Rock 01</uri>
+      <name>rock_2</name>
+      <pose>-4 -2 0 0 0 1.5</pose>
+    </include>
+
+  </world>
+</sdf>
