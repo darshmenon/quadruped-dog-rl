@@ -532,6 +532,44 @@ Robot URDF variants:
 - `urdf/go2_unitree/urdf/go2.urdf` — base model
 - `urdf/go2_unitree/urdf/go2_gz.urdf` — with Gazebo Harmonic joint controllers (for RL training)
 
+### 3D LiDAR SLAM + Frontier Exploration (RTAB-Map)
+
+The Go2 also carries a second, 3D lidar (`urdf/go2_unitree/urdf/go2_gz.urdf.xacro`'s
+`lidar3d` sensor — 16-channel, VLP-16-style gpu_lidar, `/points` PointCloud2)
+alongside the 2D one used above. `launch/slam3d_go2.launch.py` builds on
+`launch/champ_go2_gazebo.launch.py` (Gazebo + CHAMP gait engine driving the
+Go2 from `/cmd_vel`) and adds RTAB-Map ICP lidar SLAM plus an optional
+frontier explorer that walks the robot around autonomously to grow the map:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2/install/setup.bash
+ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true
+```
+
+Verified end-to-end in this environment: the 3D lidar's point cloud drives
+RTAB-Map to a real, growing occupancy grid (`/map`), and
+`scripts/frontier_explorer_go2.py` (no Nav2 costmap/planner exists for the
+Go2 yet, so this is a direct point-and-go controller, not a real planner)
+finds frontier cells on that grid and walks the robot toward them via
+`/cmd_vel` — confirmed by ~2.8m of net displacement from spawn and the map
+footprint growing (420x391 -> 477x422 cells) over a couple minutes in the
+outdoor demo world. One timing detail if you touch the explorer:
+`champ_joint_trajectory_to_go2_gz.py` treats `/cmd_vel` as stale after 0.35s
+and falls back to an idle-drift-reset that fights any slower command loop —
+the explorer's control loop runs at 10Hz for exactly that reason, only the
+(cheap, only-when-needed) frontier search itself is less frequent.
+
+Runs in an isolated `ROS_DOMAIN_ID` (default `157`) and `GZ_PARTITION`
+(default `quad3dslam`) so it doesn't cross-talk with other ROS2/Gazebo
+sessions on the same machine — override both via launch args if you want to
+share a domain with another terminal.
+
+```bash
+ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
+  ros_domain_id:=200 world:="$(pwd)/training/envs/go2_multi_terrain.sdf"
+```
+
 ### Isaac Gym backend (requires NVIDIA Isaac Gym)
 
 ```bash
