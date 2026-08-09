@@ -73,6 +73,21 @@ REACH_SUCCESS_DIST = 0.05  # fingertip-to-target distance counted as "reached"
 REACH_SIGMA = 0.12         # width of the reach-distance reward kernel
 REACH_WEIGHT = 0.8
 
+# The ARM_STOW pose (see DEFAULT_QPOS) tucks the arm down and back so it
+# doesn't interfere with walking -- its fingertip sits ~0.4m from
+# ARM_MOUNT_POS, roughly opposite the direction targets are sampled in, so a
+# typical starting reach_dist is ~0.5-0.7m. REACH_SIGMA=0.12 alone gives
+# exp(-(d/sigma)^2) and its gradient both underflow to ~0 anywhere past
+# ~0.3m -- confirmed by hand FK on the stow pose matching the observed
+# frozen fingertip exactly, and by every recorded "best" checkpoint having
+# reach reward ~1e-8 the whole episode. The policy was never once rewarded
+# for moving the arm toward the target; this dense term gives a real
+# (non-vanishing) gradient across the actual starting-distance range, with
+# the sigma kernel above still providing the fine-precision signal near the
+# goal.
+REACH_DENSE_WEIGHT = 0.3
+REACH_DENSE_NORM = 0.8    # roughly the max plausible stow-to-target distance
+
 # Two training runs both saw eval reward peak (~460) with curriculum_level
 # around 0.8-0.85 (max cmd speed ~1.0 m/s, reach radius ~0.37m) and then
 # degrade as the episode-length-only success signal kept pushing curriculum_
@@ -190,6 +205,7 @@ class Go2MujocoEnv(gym.Env):
         ee_pos = d.sensor("ee_pos").data.astype(np.float32)
         reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
         r_reach = REACH_WEIGHT * float(np.exp(-(reach_dist ** 2) / (REACH_SIGMA ** 2)))
+        r_reach_dense = REACH_DENSE_WEIGHT * max(0.0, 1.0 - reach_dist / REACH_DENSE_NORM)
         r_reach_bonus = REACH_SUCCESS_BONUS if reach_dist < REACH_SUCCESS_DIST else 0.0
 
         # Explicit stall penalty: standing still while a real command is
@@ -204,7 +220,7 @@ class Go2MujocoEnv(gym.Env):
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
             stall=r_stall, alive=ALIVE_BONUS,
-            reach=r_reach, reach_bonus=r_reach_bonus,
+            reach=r_reach, reach_dense=r_reach_dense, reach_bonus=r_reach_bonus,
         )
         return float(sum(components.values())), components
 
