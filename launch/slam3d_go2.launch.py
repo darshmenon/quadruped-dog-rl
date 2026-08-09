@@ -1,11 +1,24 @@
 """3D LiDAR SLAM (RTAB-Map) + optional frontier exploration for the Go2.
 
-Builds on launch/champ_go2_gazebo.launch.py (Gazebo + CHAMP gait engine
-driving Go2 from /cmd_vel) by bridging the 16-channel gpu_lidar point cloud
-(see urdf/go2_unitree/urdf/go2_gz.urdf.xacro's "lidar3d" sensor) and running
-RTAB-Map's ICP-registered lidar SLAM on it -- a real 3D map (and a 2D
-occupancy grid projected from it) instead of slam_toolbox's single-plane
-/scan mapping (see launch/slam_go2.launch.py for that 2D path).
+Two selectable locomotion backends (locomotion:=champ|nmpc), both wearing
+the same 16-channel gpu_lidar and feeding the same RTAB-Map ICP SLAM setup
+-- a real 3D map (and a 2D occupancy grid projected from it) instead of
+slam_toolbox's single-plane /scan mapping (see launch/slam_go2.launch.py
+for that 2D path):
+
+- champ (default): launch/champ_go2_gazebo.launch.py (native gz-sim +
+  CHAMP gait engine driving Go2 from /cmd_vel). Lidar sensor lives on
+  urdf/go2_unitree/urdf/go2_gz.urdf.xacro ("lidar3d"). The frontier
+  explorer drives it directly with Twist commands.
+- nmpc: Quad-SDK's quad_gazebo.py + quad_plan.py (global/local planner +
+  NMPC controller, the backend verified end-to-end in the README's
+  "Quad-SDK (NMPC locomotion)" section). Lidar sensor lives on
+  ros2/quad_sdk/quad_simulator/go2_description/models/go2/go2.sdf.xacro
+  (also "lidar3d"). Quad-SDK has no odom publisher at all, so
+  scripts/quadsdk_ground_truth_to_odom.py republishes its ground-truth
+  robot state as odom + TF. The frontier explorer doesn't drive this one
+  itself -- it just publishes goals to Quad-SDK's live goal_state topic
+  and lets global_body_planner/nmpc_controller do the walking.
 
 Runs in its own ROS_DOMAIN_ID/GZ_PARTITION by default so it doesn't cross
 talk with other ROS2/Gazebo sessions on this machine (see README) -- override
@@ -16,6 +29,7 @@ Usage:
     source ros2/install/setup.bash
     ros2 launch launch/slam3d_go2.launch.py
     ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true
+    ros2 launch launch/slam3d_go2.launch.py locomotion:=nmpc headless:=true explore:=true
 """
 
 from pathlib import Path
@@ -24,29 +38,47 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_WORLD = REPO / "training" / "envs" / "go2_gz_world_outdoor.sdf"
 FRONTIER_EXPLORER = REPO / "scripts" / "frontier_explorer_go2.py"
+GROUND_TRUTH_TO_ODOM = REPO / "scripts" / "quadsdk_ground_truth_to_odom.py"
+
+RTABMAP_COMMON_PARAMS = {
+    "use_sim_time": True,
+    "subscribe_depth": False,
+    "subscribe_rgb": False,
+    "subscribe_scan_cloud": True,
+    "approx_sync": True,
+    "wait_for_transform": 0.3,
+    # RTAB-Map params are strings.
+    "Reg/Strategy": "1",           # ICP -- no camera for Vis registration
+    "Icp/PointToPlane": "true",
+    "Grid/Sensor": "0",            # occupancy grid from the lidar cloud
+    "Grid/3D": "false",            # projected 2D grid for the frontier explorer
+    "Grid/CellSize": "0.05",
+    "Grid/RangeMax": "20.0",
+    # 16-channel vertical resolution is sparse enough that normal-based
+    # ground segmentation sprinkles spurious "obstacle" cells on flat
+    # ground -- filter isolated points before classification (same fix
+    # rosnav's slam_nav.launch.py lidar_type:=3d path uses).
+    "Grid/NoiseFilteringRadius": "0.1",
+    "Grid/NoiseFilteringMinNeighbors": "5",
+    "Mem/IncrementalMemory": "true",
+}
 
 
-def generate_launch_description():
-    headless = LaunchConfiguration("headless")
-    rviz = LaunchConfiguration("rviz")
-    world = LaunchConfiguration("world")
-    explore = LaunchConfiguration("explore")
-    ros_domain_id = LaunchConfiguration("ros_domain_id")
-    gz_partition = LaunchConfiguration("gz_partition")
-
+def _champ_actions(headless, world, explore):
     champ_gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(REPO / "launch" / "champ_go2_gazebo.launch.py")),
         launch_arguments={
@@ -80,46 +112,168 @@ def generate_launch_description():
             name="rtabmap",
             output="screen",
             parameters=[{
-                "use_sim_time": True,
+                **RTABMAP_COMMON_PARAMS,
                 "frame_id": "base",
                 "odom_frame_id": "odom",
                 "map_frame_id": "map",
-                "subscribe_depth": False,
-                "subscribe_rgb": False,
-                "subscribe_scan_cloud": True,
-                "approx_sync": True,
-                "wait_for_transform": 0.3,
-                # RTAB-Map params are strings.
-                "Reg/Strategy": "1",           # ICP -- no camera for Vis registration
-                "Icp/PointToPlane": "true",
-                "Grid/Sensor": "0",            # occupancy grid from the lidar cloud
-                "Grid/3D": "false",            # projected 2D grid for the frontier explorer
-                "Grid/CellSize": "0.05",
-                "Grid/RangeMax": "20.0",
-                # 16-channel vertical resolution is sparse enough that
-                # normal-based ground segmentation sprinkles spurious
-                # "obstacle" cells on flat ground -- filter isolated points
-                # before classification (same fix rosnav's slam_nav.launch.py
-                # lidar_type:=3d path uses).
-                "Grid/NoiseFilteringRadius": "0.1",
-                "Grid/NoiseFilteringMinNeighbors": "5",
-                "Mem/IncrementalMemory": "true",
             }],
             remappings=[("odom", "/odom"), ("scan_cloud", "/points")],
             arguments=["-d"],  # fresh database each run
         )],
     )
 
-    # launch_ros Node requires a ROS2 package; this repo's scripts/ isn't one
-    # (see training/launch/gazebo_rl.launch.py's __REPO_ROOT__ comment for the
-    # same constraint), so run it as a plain process like that file does.
     frontier_explorer = TimerAction(
         period=20.0,
         condition=IfCondition(explore),
         actions=[ExecuteProcess(
-            cmd=["python3", str(FRONTIER_EXPLORER), "--ros-args", "-p", "use_sim_time:=true"],
+            cmd=["python3", str(FRONTIER_EXPLORER), "--ros-args",
+                 "-p", "use_sim_time:=true", "-p", "control_mode:=cmd_vel"],
             output="screen",
         )],
+    )
+
+    return [champ_gazebo, points_bridge, rtabmap_slam, frontier_explorer]
+
+
+def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore):
+    quad_gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            str(REPO / "ros2" / "quad_sdk" / "quad_utils" / "launch" / "quad_gazebo.py")),
+        launch_arguments={
+            "gui": nmpc_gui_flag,
+            "rviz": "false",
+            "world": nmpc_world,
+        }.items(),
+    )
+
+    # Same stand sequence walk_quadsdk_go2.sh uses: a single one-shot publish
+    # can be lost to a ROS2 discovery race, so hold it for a few seconds.
+    stand = TimerAction(
+        period=15.0,
+        actions=[ExecuteProcess(
+            cmd=["timeout", "5", "ros2", "topic", "pub", "/robot_1/control/mode",
+                 "std_msgs/msg/UInt8", "data: 1", "--rate", "10"],
+            output="screen",
+        )],
+    )
+
+    # goal_state:="[1.0, 0.0]" just gets the planner moving immediately on
+    # startup; the frontier explorer takes over with real goals once RTAB-Map
+    # has a map (see global_body_planner.cpp's live goal_state_sub_).
+    nmpc_plan = TimerAction(
+        period=18.0,
+        actions=[IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                str(REPO / "ros2" / "quad_sdk" / "quad_utils" / "launch" / "quad_plan.py")),
+            launch_arguments={"goal_state": "[1.0, 0.0]"}.items(),
+        )],
+    )
+
+    # See the lidar3d sensor comment in go2.sdf.xacro -- world name is
+    # "default" (gz-sim's own default, not a name this repo chose) and
+    # "robot_1" is quad_gazebo.py's default robot_configs entry name.
+    points_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="points_bridge",
+        output="screen",
+        arguments=[
+            "/world/default/model/robot_1/link/body/sensor/lidar3d/scan/points"
+            "@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
+        ],
+        remappings=[
+            ("/world/default/model/robot_1/link/body/sensor/lidar3d/scan/points", "/robot_1/points"),
+        ],
+        parameters=[{"use_sim_time": True}],
+    )
+
+    # gz-sim auto-derives the point cloud's frame_id from the sensor's scoped
+    # name (confirmed empirically: "robot_1/body/lidar3d") since plain SDF
+    # <sensor> blocks have no frame-override tag (unlike the URDF path's
+    # <gz_frame_id>base</gz_frame_id>, which sdformat_urdf's converter does
+    # honor -- go2_gz.urdf.xacro's cloud really does come through as "base").
+    # Without this, RTAB-Map can't place the cloud relative to "body" at all
+    # ("TF of received scan cloud ... is not set, aborting"). Static because
+    # it's the sensor's fixed mount offset, matching go2.sdf.xacro's lidar3d
+    # <pose>0 0 0.16 0 0 0</pose>.
+    lidar_static_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="lidar3d_static_tf",
+        output="screen",
+        arguments=["0", "0", "0.16", "0", "0", "0", "body", "robot_1/body/lidar3d"],
+        parameters=[{"use_sim_time": True}],
+    )
+
+    ground_truth_to_odom = TimerAction(
+        period=10.0,
+        actions=[ExecuteProcess(
+            cmd=["python3", str(GROUND_TRUTH_TO_ODOM), "--ros-args",
+                 "-p", "use_sim_time:=true",
+                 "-p", "ground_truth_topic:=/robot_1/state/ground_truth",
+                 "-p", "odom_topic:=/robot_1/odom",
+                 "-p", "base_frame:=body"],
+            output="screen",
+        )],
+    )
+
+    rtabmap_slam = TimerAction(
+        period=22.0,
+        actions=[Node(
+            package="rtabmap_slam",
+            executable="rtabmap",
+            name="rtabmap",
+            output="screen",
+            parameters=[{
+                **RTABMAP_COMMON_PARAMS,
+                "frame_id": "body",
+                "odom_frame_id": "odom",
+                "map_frame_id": "map",
+            }],
+            remappings=[("odom", "/robot_1/odom"), ("scan_cloud", "/robot_1/points")],
+            arguments=["-d"],
+        )],
+    )
+
+    frontier_explorer = TimerAction(
+        period=26.0,
+        condition=IfCondition(explore),
+        actions=[ExecuteProcess(
+            cmd=["python3", str(FRONTIER_EXPLORER), "--ros-args",
+                 "-p", "use_sim_time:=true",
+                 "-p", "control_mode:=nmpc_goal",
+                 "-p", "base_frame:=body",
+                 "-p", "goal_state_topic:=/robot_1/goal_state"],
+            output="screen",
+        )],
+    )
+
+    return [quad_gazebo, stand, nmpc_plan, points_bridge, lidar_static_tf,
+            ground_truth_to_odom, rtabmap_slam, frontier_explorer]
+
+
+def generate_launch_description():
+    headless = LaunchConfiguration("headless")
+    rviz = LaunchConfiguration("rviz")
+    world = LaunchConfiguration("world")
+    nmpc_world = LaunchConfiguration("nmpc_world")
+    explore = LaunchConfiguration("explore")
+    ros_domain_id = LaunchConfiguration("ros_domain_id")
+    gz_partition = LaunchConfiguration("gz_partition")
+
+    # quad_gazebo.py's `gui` arg is the inverse of this launch's `headless`
+    # (same true/false semantics as champ_go2_gazebo.launch.py, just spelled
+    # the opposite way upstream).
+    nmpc_gui_flag = PythonExpression(["'false' if '", headless, "' == 'true' else 'true'"])
+
+    champ_branch = GroupAction(
+        condition=LaunchConfigurationEquals("locomotion", "champ"),
+        actions=_champ_actions(headless, world, explore),
+    )
+
+    nmpc_branch = GroupAction(
+        condition=LaunchConfigurationEquals("locomotion", "nmpc"),
+        actions=_nmpc_actions(nmpc_gui_flag, nmpc_world, explore),
     )
 
     rviz2 = Node(
@@ -136,9 +290,17 @@ def generate_launch_description():
         DeclareLaunchArgument("headless", default_value="false",
                                description="Skip Gazebo/RViz GUIs (server + mapping only)"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("locomotion", default_value="champ",
+                               description="Locomotion backend: 'champ' (default, CHAMP gait "
+                                           "engine via /cmd_vel) or 'nmpc' (Quad-SDK global/local "
+                                           "planner + NMPC controller, goal-driven)."),
         DeclareLaunchArgument("world", default_value=str(DEFAULT_WORLD),
-                               description="SDF world -- defaults to the outdoor demo world "
-                                           "(trees/rocks scattered on open ground)"),
+                               description="SDF world path, locomotion:=champ only -- defaults "
+                                           "to the outdoor demo world (trees/rocks on open ground)."),
+        DeclareLaunchArgument("nmpc_world", default_value="big_flat.sdf",
+                               description="World filename from quad_sim_scripts/worlds/, "
+                                           "locomotion:=nmpc only (flat.sdf's mesh only spans "
+                                           "~5m -- too small to explore)."),
         DeclareLaunchArgument("explore", default_value="false",
                                description="Auto-start scripts/frontier_explorer_go2.py"),
         DeclareLaunchArgument(
@@ -152,9 +314,7 @@ def generate_launch_description():
                         "any other gz sim instance running concurrently."),
         SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id),
         SetEnvironmentVariable("GZ_PARTITION", gz_partition),
-        champ_gazebo,
-        points_bridge,
-        rtabmap_slam,
-        frontier_explorer,
+        champ_branch,
+        nmpc_branch,
         rviz2,
     ])

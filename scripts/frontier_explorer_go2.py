@@ -5,21 +5,34 @@ There's no Nav2 costmap/planner wired up for the Go2 yet (no footprint or
 controller tuning exists for a legged base), so this doesn't do Nav2-style
 frontier exploration with a global planner. Instead it directly scores
 frontier cells on the /map occupancy grid (wavefront from the robot's cell,
-frontier = reachable free cell adjacent to unknown) and drives the best
-cluster's centroid with a simple point-and-go Twist controller published to
-/cmd_vel, which CHAMP's quadruped_controller (cmd_vel/smooth) turns into a
-walking gait. Good enough to grow the RTAB-Map map autonomously; not a
-substitute for a real planner if obstacles crowd the direct line to a goal.
+frontier = reachable free cell adjacent to unknown) and hands the best
+cluster's centroid off to whichever locomotion backend is driving:
+
+- control_mode:=cmd_vel (default, CHAMP backend): a simple point-and-go
+  Twist controller published to /cmd_vel, which CHAMP's
+  quadruped_controller (cmd_vel/smooth) turns into a walking gait.
+- control_mode:=nmpc_goal (Quad-SDK backend): publish the goal as a
+  geometry_msgs/PointStamped to Quad-SDK's live goal_state topic (see
+  global_body_planner.cpp's goal_state_sub_) and let global_body_planner /
+  local_planner / nmpc_controller do the actual walking -- no Twist
+  involved, so linear_speed/angular_speed/BLOCKED_LOOKAHEAD don't apply.
+
+Good enough to grow the RTAB-Map map autonomously; not a substitute for a
+real planner if obstacles crowd the direct line to a goal (cmd_vel mode
+only -- NMPC mode gets real obstacle-aware planning from Quad-SDK itself).
 
 Usage:
     python3 scripts/frontier_explorer_go2.py --ros-args -p use_sim_time:=true
+    python3 scripts/frontier_explorer_go2.py --ros-args -p use_sim_time:=true \\
+        -p control_mode:=nmpc_goal -p base_frame:=body \\
+        -p goal_state_topic:=/robot_1/goal_state
 """
 
 import math
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from tf2_ros import TransformException
@@ -43,33 +56,44 @@ class FrontierExplorer(Node):
         self.declare_parameter('linear_speed', 0.35)
         self.declare_parameter('angular_speed', 0.6)
         self.declare_parameter('control_period', 0.1)
+        self.declare_parameter('control_mode', 'cmd_vel')  # 'cmd_vel' or 'nmpc_goal'
+        self.declare_parameter('goal_state_topic', '/robot_1/goal_state')
 
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.linear_speed = self.get_parameter('linear_speed').value
         self.angular_speed = self.get_parameter('angular_speed').value
+        self.control_mode = self.get_parameter('control_mode').value
+        self.published_goal_xy = None  # last goal actually sent in nmpc_goal mode
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        if self.control_mode == 'nmpc_goal':
+            self.goal_state_pub = self.create_publisher(
+                PointStamped, self.get_parameter('goal_state_topic').value, 10)
+        else:
+            self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 1)
 
         self.latest_map = None
         self.goal_xy = None
         self.last_frontier_seen = self.get_clock().now()
 
-        # champ_joint_trajectory_to_go2_gz.py treats /cmd_vel as stale after
-        # 0.35s (COMMAND_TIMEOUT_S) and falls back to its idle-drift-reset
-        # behaviour, which teleports the robot back upright -- so this needs
-        # to keep publishing well under that, not just whenever it replans a
-        # goal. The expensive frontier search only actually runs inside
-        # _step when goal_xy is None, so a fast tick here stays cheap.
+        # champ_joint_trajectory_to_go2_gz.py (cmd_vel mode only) treats
+        # /cmd_vel as stale after 0.35s (COMMAND_TIMEOUT_S) and falls back to
+        # its idle-drift-reset behaviour, which teleports the robot back
+        # upright -- so this needs to keep publishing well under that, not
+        # just whenever it replans a goal. nmpc_goal mode has no such
+        # deadline (Quad-SDK's global_body_planner just keeps tracking
+        # whatever goal it last got), but the expensive frontier search only
+        # actually runs inside _step when goal_xy is None either way, so a
+        # fast tick here stays cheap in both modes.
         period = self.get_parameter('control_period').value
         self.create_timer(period, self._step)
         self.get_logger().info(
-            f'frontier_explorer_go2 started (map_frame={self.map_frame}, '
-            f'base_frame={self.base_frame})')
+            f'frontier_explorer_go2 started (control_mode={self.control_mode}, '
+            f'map_frame={self.map_frame}, base_frame={self.base_frame})')
 
     def _on_map(self, msg: OccupancyGrid):
         self.latest_map = msg
@@ -218,10 +242,27 @@ class FrontierExplorer(Node):
                 self.get_logger().info(
                     f'no frontiers left for {elapsed:.0f}s -- exploration complete, stopping.',
                     throttle_duration_sec=NO_FRONTIER_TIMEOUT)
-            self.cmd_pub.publish(Twist())
+            if self.control_mode == 'cmd_vel':
+                self.cmd_pub.publish(Twist())
             return
 
         self.last_frontier_seen = self.get_clock().now()
+
+        if self.control_mode == 'nmpc_goal':
+            # Quad-SDK's global_body_planner already tracks whatever goal it
+            # last received (see global_body_planner.cpp's goal_state_sub_)
+            # and dedups by header.stamp, so only publish when the frontier
+            # goal actually changes -- no need to re-send every tick.
+            if self.goal_xy != self.published_goal_xy:
+                gx, gy = self.goal_xy
+                point = PointStamped()
+                point.header.stamp = self.get_clock().now().to_msg()
+                point.header.frame_id = self.map_frame
+                point.point.x, point.point.y = gx, gy
+                self.goal_state_pub.publish(point)
+                self.published_goal_xy = self.goal_xy
+            return
+
         gx, gy = self.goal_xy
         angle_to_goal = math.atan2(gy - ry, gx - rx)
         angle_err = math.atan2(math.sin(angle_to_goal - yaw), math.cos(angle_to_goal - yaw))
@@ -248,7 +289,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(Twist())
+        if node.control_mode == 'cmd_vel':
+            node.cmd_pub.publish(Twist())
         node.destroy_node()
         rclpy.shutdown()
 

@@ -570,6 +570,28 @@ ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
   ros_domain_id:=200 world:="$(pwd)/training/envs/go2_multi_terrain.sdf"
 ```
 
+**`locomotion:=nmpc`** swaps CHAMP out for Quad-SDK's NMPC backend instead
+(same lidar/RTAB-Map setup, a second `lidar3d` sensor on
+`ros2/quad_sdk/quad_simulator/go2_description/models/go2/go2.sdf.xacro`):
+
+```bash
+ros2 launch launch/slam3d_go2.launch.py locomotion:=nmpc headless:=true explore:=true
+```
+
+Quad-SDK has no odom publisher at all (its state estimator is disabled by
+default) and no `odom->body` TF, so `scripts/quadsdk_ground_truth_to_odom.py`
+republishes its ground-truth robot state as both. The frontier explorer
+doesn't drive this backend directly — it publishes frontier goals to
+Quad-SDK's live `goal_state` topic (`geometry_msgs/PointStamped`,
+`global_body_planner.cpp`'s `goal_state_sub_`) and lets
+`global_body_planner`/`local_planner`/`nmpc_controller` do the walking
+(`control_mode:=nmpc_goal`, vs. `cmd_vel` for the CHAMP backend). Verified
+end-to-end: RTAB-Map builds a real occupancy grid off this backend's cloud
+too (351x422 cells and growing, zero conversion errors) once a
+`static_transform_publisher` bridges the sensor's gz-derived frame name
+(`robot_1/body/lidar3d` — plain SDF has no `<gz_frame_id>`-style override,
+unlike the URDF path) to `body`.
+
 ### Isaac Gym backend (requires NVIDIA Isaac Gym)
 
 ```bash
