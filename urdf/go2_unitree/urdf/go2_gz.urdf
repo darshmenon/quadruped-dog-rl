@@ -1087,4 +1087,48 @@
       </ray>
     </sensor>
   </gazebo>
+  <!-- 3D LiDAR (16-channel, VLP-16-style) for RTAB-Map point-cloud SLAM.
+       Mounted at z=0.15 (base origin), x=-0.05, rear of center so it
+       clears the manipulator arm (mounted forward at x=0.08, see arm
+       include above) and sits about 0.09m above the base collision box's
+       top face (z=0.057), matching the 0.10m clearance rosnav's
+       lidar3d.xacro found necessary to avoid the downward FOV cone
+       self-hitting the chassis at close range. Publishes
+       gz.msgs.PointCloudPacked on the nested "points/points" topic
+       (gpu_lidar publishes LaserScan on its own topic and PointCloud2 on
+       a nested "/points" subtopic); bridge accordingly. -->
+  <gazebo reference="base">
+    <sensor name="lidar3d" type="gpu_lidar">
+      <pose>-0.05 0 0.15 0 0 0</pose>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>10</update_rate>
+      <topic>points</topic>
+      <gz_frame_id>base</gz_frame_id>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>1800</samples>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>16</samples>
+            <min_angle>-0.1745</min_angle>
+            <max_angle>0.1745</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.3</min>
+          <max>30.0</max>
+          <resolution>0.001</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </lidar>
+    </sensor>
+  </gazebo>
 </robot>
