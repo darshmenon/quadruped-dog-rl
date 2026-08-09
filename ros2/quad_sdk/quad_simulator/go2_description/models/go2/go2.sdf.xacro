@@ -56,6 +56,48 @@
           <ambient>1 1 1 1</ambient>
         </material>
       </visual>
+      <!-- 3D LiDAR (16-channel, VLP-16-style) for RTAB-Map point-cloud SLAM
+           on the NMPC locomotion backend, mirroring the sensor added to
+           urdf/go2_unitree/urdf/go2_gz.urdf.xacro for the CHAMP backend.
+           Mounted 0.16m above the body origin: the body collision box is
+           0.376x0.0935x0.114 centered on the origin (top face at z=0.057),
+           so this clears it by about 0.10m, same margin used on the other
+           backend to avoid the downward FOV cone self-hitting the chassis.
+           x=0/y=0 is clear of the forward head collision geometry (starts
+           around x=0.285) and there's no arm on this description. No
+           per-sensor plugin needed, the world-level Sensors system
+           (see quad_sim_scripts/worlds/*.xml.xacro) already handles
+           gpu_lidar, same as it does for every terrain world's rendering. -->
+      <sensor name='lidar3d' type='gpu_lidar'>
+        <pose>0 0 0.16 0 0 0</pose>
+        <always_on>true</always_on>
+        <visualize>false</visualize>
+        <update_rate>10</update_rate>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>1800</samples>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>16</samples>
+              <min_angle>-0.1745</min_angle>
+              <max_angle>0.1745</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.3</min>
+            <max>30.0</max>
+            <resolution>0.001</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.01</stddev>
+          </noise>
+        </lidar>
+      </sensor>
     </link>
     <joint name='8' type='revolute'>
       <pose relative_to='body'>0.19339999999999999 0.0465 0 0 0 0</pose>
