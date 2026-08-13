@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, GroupAction, IncludeLaunchDescription, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, GroupAction, IncludeLaunchDescription, ExecuteProcess, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration, TextSubstitution, EnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace, Node
@@ -17,6 +17,19 @@ def launch_ignition_world(context, *args, **kwargs):
 
     pkg_share = FindPackageShare('quad_sim_scripts').perform(context)
     world_path = os.path.join(pkg_share, 'worlds', f"{world_name}")
+
+    # World files like big_flat.sdf reference local models via
+    # model://<name> (e.g. model://big_flat, share/quad_sim_scripts/models/
+    # big_flat/) -- gz-sim only resolves those against GZ_SIM_RESOURCE_PATH,
+    # and nothing in quad_sim_scripts' package.xml/CMakeLists exports that
+    # path automatically. Without this, spawning fails with "Unable to find
+    # uri[model://big_flat]" and the robot `create` call times out waiting
+    # for gz-sim's world-list service (which never came up).
+    models_path = os.path.join(pkg_share, 'models')
+    existing_resource_path = os.environ.get('GZ_SIM_RESOURCE_PATH', '')
+    os.environ['GZ_SIM_RESOURCE_PATH'] = (
+        f"{models_path}:{existing_resource_path}" if existing_resource_path else models_path
+    )
 
     gz_args = [world_path]
     if not paused:

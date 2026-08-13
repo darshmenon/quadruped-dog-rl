@@ -10,26 +10,30 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URDF_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'urdf', 'go2_unitree', 'urdf', 'go2.urdf'
+    REPO_ROOT, 'urdf', 'go2_unitree', 'urdf', 'go2_gz.urdf'
 )
 
 
 def _load_robot_description():
     with open(URDF_PATH, 'r', encoding='utf-8') as urdf_file:
-        return urdf_file.read()
+        text = urdf_file.read()
+    # go2_gz.urdf bakes in a __REPO_ROOT__ placeholder for the ros2_control
+    # params file path (see scripts/make_go2_stand.py), resolved here.
+    return text.replace('__REPO_ROOT__', REPO_ROOT)
 
 
 def generate_launch_description():
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
+    champ_description_share = get_package_share_directory('champ_description')
     robot_description = _load_robot_description()
     use_rviz = LaunchConfiguration('rviz')
     spawn_z = LaunchConfiguration('spawn_z')
@@ -50,6 +54,16 @@ def generate_launch_description():
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
         launch_arguments={'gz_args': '-r empty.sdf'}.items(),
+    )
+
+    gz_resource_path = SetEnvironmentVariable(
+        'GZ_SIM_RESOURCE_PATH',
+        os.path.dirname(champ_description_share)
+        + (
+            os.pathsep + os.environ['GZ_SIM_RESOURCE_PATH']
+            if os.environ.get('GZ_SIM_RESOURCE_PATH')
+            else ''
+        ),
     )
 
     # Robot state publisher
@@ -92,17 +106,22 @@ def generate_launch_description():
         ]
     )
 
+    rviz_config = os.path.join(
+        REPO_ROOT, 'urdf', 'go2_unitree', 'rviz', 'go2_gz.rviz'
+    )
     rviz2 = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
         output='screen',
+        arguments=['-d', rviz_config],
         condition=IfCondition(use_rviz),
     )
 
     return LaunchDescription([
         rviz_arg,
         spawn_z_arg,
+        gz_resource_path,
         gazebo,
         robot_state_publisher,
         spawn_robot,

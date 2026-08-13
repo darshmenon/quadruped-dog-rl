@@ -152,8 +152,8 @@ def spawn_sdf_model(context, *args, **kwargs):
         # output='screen',
         arguments=args,
         additional_env={
-            'GZ_SIM_RESOURCE_PATH': (EnvironmentVariable('GZ_SIM_RESOURCE_PATH')),
-            'GZ_SIM_SYSTEM_PLUGIN_PATH': (EnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH')),
+            'GZ_SIM_RESOURCE_PATH': (EnvironmentVariable('GZ_SIM_RESOURCE_PATH', default_value='')),
+            'GZ_SIM_SYSTEM_PLUGIN_PATH': (EnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', default_value='')),
             'GZ_SIM_VERBOSE': '1'}
 
     )

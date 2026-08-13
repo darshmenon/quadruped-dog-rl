@@ -26,10 +26,20 @@
     </plugin>
   </gazebo>
 
+  <!-- Publishes /world/<world>/model/<model>/joint_state (gz.msgs.Model)
+       unconditionally every update, independent of ros2_control's
+       controller_manager lifecycle. Launch files bridge this straight to
+       ROS /joint_states -- see launch/gazebo_go2.launch.py's bridge args. -->
+  <gazebo>
+    <plugin filename="libgz-sim-joint-state-publisher-system.so"
+            name="gz::sim::systems::JointStatePublisher">
+    </plugin>
+  </gazebo>
+
   <!-- ros2_control hardware interface -->
   <ros2_control name="go2_gz" type="system">
     <hardware>
-      <plugin>gz_ros2_control/GzSystem</plugin>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
     </hardware>
     <joint name="FL_hip_joint">
       <command_interface name="position"/>

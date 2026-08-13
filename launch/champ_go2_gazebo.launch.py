@@ -27,6 +27,7 @@ def generate_launch_description():
     headless = LaunchConfiguration("headless")
     rviz = LaunchConfiguration("rviz")
     world = LaunchConfiguration("world")
+    state_estimation = LaunchConfiguration("state_estimation")
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -60,9 +61,13 @@ def generate_launch_description():
             "joint_controller_topic": "/champ/joint_trajectory",
             "publish_joint_states": "false",
             "publish_foot_contacts": "false",
-            "publish_odom_tf": "false",
+            # Off by default (RL/joint-control path drives Gazebo directly via
+            # the adapter below and doesn't need CHAMP's own odom estimate).
+            # Nav2 needs a real odom->base TF chain, so nav2_go2_autonomy.launch.py
+            # sets state_estimation:=true, which also turns publish_odom_tf on.
+            "publish_odom_tf": state_estimation,
             "close_loop_odom": "true",
-            "state_estimation": "false",
+            "state_estimation": state_estimation,
         }.items(),
     )
 
@@ -87,6 +92,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "world",
             default_value=str(REPO / "training" / "envs" / "go2_gz_world.sdf"),
+        ),
+        DeclareLaunchArgument(
+            "state_estimation", default_value="false",
+            description="Launch CHAMP's state_estimation_node + odom/footprint EKF "
+                        "chain (needed for Nav2; off by default since the RL/"
+                        "joint-control path doesn't use it).",
         ),
         gazebo,
         # stand now runs at t=9s for 2s (see training/launch/gazebo_rl.launch.py),

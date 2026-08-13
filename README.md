@@ -18,7 +18,7 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 
 ![Unitree Go2 in RViz2](docs/images/go2_rviz2.png)
 
-![Unitree Go2 in Gazebo Garden](docs/images/go2_gazebo.png)
+![Unitree Go2 in Gazebo Harmonic](docs/images/go2_gazebo.png)
 
 ![Go2 with manipulator arm mounted, in Gazebo](docs/images/go2_manipulator_arm.png)
 
@@ -70,7 +70,7 @@ quadruped-robotics-stack/
 │   └── quad_sdk_external/   # RBDL + IPOPT sources/local build for quad_sdk
 ├── launch/                  # Top-level launch files
 │   ├── view_go2.launch.py   # View Go2 URDF in RViz2
-│   ├── gazebo_go2.launch.py # Spawn Go2 in Gazebo Garden
+│   ├── gazebo_go2.launch.py # Spawn Go2 in Gazebo Harmonic
 │   ├── gazebo_sim.launch.py # Generic Gazebo sim launcher (CHAMP)
 │   ├── rviz_view.launch.py  # Generic RViz2 viewer
 │   ├── policy_deploy.launch.py # Deploy trained RL policy (MuJoCo)
@@ -140,7 +140,7 @@ source /opt/ros/humble/setup.bash
 ros2 launch launch/view_go2.launch.py
 ```
 
-### 2. Spawn Go2 in Gazebo Garden
+### 2. Spawn Go2 in Gazebo Harmonic
 
 **Terminal 1 — Launch simulation**
 ```bash
@@ -148,7 +148,15 @@ source /opt/ros/humble/setup.bash
 ros2 launch launch/gazebo_go2.launch.py
 ```
 
-> **Note:** This starts Gazebo Garden, spawns the Go2, bridges topics to ROS2, and opens RViz2 alongside it.
+> **Note:** This starts Gazebo Harmonic, spawns the Go2, bridges topics to ROS2, and opens RViz2 alongside it.
+
+Quick TF check after startup:
+
+```bash
+ros2 run tf2_ros tf2_echo base FL_calf
+```
+
+If that reports no transform, make sure this launch is the only Go2 Gazebo/RViz session in the current `ROS_DOMAIN_ID`.
 
 ### Terminal 2 — Control the robot
 
@@ -533,6 +541,8 @@ Robot URDF variants:
 - `urdf/go2_unitree/urdf/go2_gz.urdf` — with Gazebo Harmonic joint controllers (for RL training)
 
 ### 3D LiDAR SLAM + Frontier Exploration (RTAB-Map)
+
+![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
 
 The Go2 also carries a second, 3D lidar (`urdf/go2_unitree/urdf/go2_gz.urdf.xacro`'s
 `lidar3d` sensor — 16-channel, VLP-16-style gpu_lidar, `/points` PointCloud2)

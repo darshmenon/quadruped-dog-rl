@@ -16,7 +16,7 @@ from launch_ros.actions import Node
 URDF_MAP = {
     'go2': os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'urdf', 'go2_unitree', 'urdf', 'go2.urdf'
+        'urdf', 'go2_unitree', 'urdf', 'go2_gz.urdf'
     ),
 }
 
@@ -31,8 +31,9 @@ def _launch_setup(context, *args, **kwargs):
             f"Available: {list(URDF_MAP.keys())}"
         )
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(urdf_path, 'r') as f:
-        robot_description = f.read()
+        robot_description = f.read().replace('__REPO_ROOT__', repo_root)
 
     robot_state_publisher = Node(
         package='robot_state_publisher',

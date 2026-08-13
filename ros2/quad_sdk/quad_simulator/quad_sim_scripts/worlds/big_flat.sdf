@@ -29,9 +29,11 @@
       name="gz::sim::systems::SceneBroadcaster">
     </plugin>
 
-    <plugin 
+    <plugin
       filename="libgz-sim8-sensors-system"
-      name="gz::sim::systems::Sensors"/>
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
 
     <plugin 
       filename="libgz-sim8-user-commands-system"

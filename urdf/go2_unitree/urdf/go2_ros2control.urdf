@@ -1217,7 +1217,7 @@ Stephen Brawner (brawner@gmail.com)
 
   <ros2_control name="go2_gz" type="system">
     <hardware>
-      <plugin>gz_ros2_control/GzSystem</plugin>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
     </hardware>
     <joint name="FL_hip_joint">
       <command_interface name="position"/>

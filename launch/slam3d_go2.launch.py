@@ -81,9 +81,13 @@ RTABMAP_COMMON_PARAMS = {
 def _champ_actions(headless, world, explore):
     champ_gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(REPO / "launch" / "champ_go2_gazebo.launch.py")),
+        # Do NOT pass rviz:=false here. This GroupAction is scoped=False (see
+        # generate_launch_description) so an included launch_argument would
+        # clobber the parent LaunchConfiguration("rviz") and prevent this
+        # file's own slam.rviz Node from starting. champ_go2_gazebo already
+        # defaults rviz to false.
         launch_arguments={
             "headless": headless,
-            "rviz": "false",  # this launch's own rviz below uses the SLAM view instead
             "world": world,
         }.items(),
     )
@@ -268,6 +272,13 @@ def generate_launch_description():
 
     champ_branch = GroupAction(
         condition=LaunchConfigurationEquals("locomotion", "champ"),
+        # Not scoped: champ_go2_gazebo.launch.py declares "state_estimation" and
+        # reads it back inside a TimerAction (fires 13s later, after this
+        # group's synchronous action list -- including PopLaunchConfigurations --
+        # has already been visited). A scoped group pops that configuration out
+        # of context before the timer fires, so the deferred lookup throws
+        # "launch configuration 'state_estimation' does not exist".
+        scoped=False,
         actions=_champ_actions(headless, world, explore),
     )
 

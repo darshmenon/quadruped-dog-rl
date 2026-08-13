@@ -88,6 +88,9 @@ def _launch_setup(context, *args, **kwargs):
     # Robot state publisher (TF from URDF)
     with open(URDF, "r") as f:
         robot_description = f.read()
+    # go2_gz.urdf bakes in a __REPO_ROOT__ placeholder for the ros2_control
+    # params file path (see scripts/make_go2_stand.py), resolved here.
+    robot_description = robot_description.replace("__REPO_ROOT__", str(REPO))
 
     robot_state_pub = Node(
         package="robot_state_publisher",

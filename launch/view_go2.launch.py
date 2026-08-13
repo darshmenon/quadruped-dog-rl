@@ -15,11 +15,12 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     urdf_file = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'urdf', 'go2_unitree', 'urdf', 'go2.urdf'
+        'urdf', 'go2_unitree', 'urdf', 'go2_gz.urdf'
     )
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(urdf_file, 'r') as f:
-        robot_description = f.read()
+        robot_description = f.read().replace('__REPO_ROOT__', repo_root)
 
     robot_state_publisher = Node(
         package='robot_state_publisher',
