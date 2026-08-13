@@ -33,12 +33,16 @@ CALF_DEFAULT = np.array([-1.5, -1.5, -1.5, -1.5], dtype=np.float64)
 L1 = 0.213
 L2 = 0.213
 PZ_NOM = 0.306
-STRIDE_LEN = 0.06
+# Per-leg sagittal stand bias from FK(thigh/calf defaults). Centering the
+# stride on 0 yanked rear feet ~6cm back at gait start and yawed the body.
+PX_NOM = np.array([0.016, 0.016, 0.077, 0.077], dtype=np.float64)
+STRIDE_LEN = 0.10
+YAW_STRIDE_GAIN = 0.08
 
-VX_MAX = 0.25
-VX_MIN = -0.15
-VY_MAX = 0.12
-WZ_MAX = 0.25
+VX_MAX = 0.35
+VX_MIN = -0.20
+VY_MAX = 0.15
+WZ_MAX = 0.40
 CMD_STEP = 0.03
 CTRL_DT = 0.02
 
@@ -71,13 +75,13 @@ def _leg_ik(px, pz):
     return float(thigh), float(calf)
 
 
-def _foot_target(phi, stride, duty_factor, step_height):
+def _foot_target(phi, stride, duty_factor, step_height, px_nom=0.0):
     boundary = duty_factor * 2.0 * np.pi
     if phi < boundary:
         t = phi / boundary
-        return stride * (0.5 - t), PZ_NOM
+        return px_nom + stride * (0.5 - t), PZ_NOM
     t = (phi - boundary) / (2.0 * np.pi - boundary)
-    return stride * (-0.5 + t), PZ_NOM - step_height * np.sin(t * np.pi)
+    return px_nom + stride * (-0.5 + t), PZ_NOM - step_height * np.sin(t * np.pi)
 
 
 def _joint_targets(leg_phases, cmd, gait_params):
@@ -98,16 +102,23 @@ def _joint_targets(leg_phases, cmd, gait_params):
     targets = []
 
     for i in range(4):
+        # Right legs +, left legs −: longer right stride → CCW (positive wz).
         yaw_sign = 1.0 if i % 2 == 1 else -1.0
         px, pz = _foot_target(
             leg_phases[i],
-            stride + yaw_sign * 0.03 * wz,
+            stride + yaw_sign * YAW_STRIDE_GAIN * wz,
             gait_params.duty_factor,
             step_height,
+            float(PX_NOM[i]),
         )
         thigh, calf = _leg_ik(px, pz)
         lat_sign = 1.0 if i % 2 == 0 else -1.0
-        hip = HIP_DEFAULT[i] + lat_sign * 0.12 * vy / VY_MAX
+        # Strafe + small yaw hip assist so turns don't rely on stride alone.
+        hip = (
+            HIP_DEFAULT[i]
+            + lat_sign * 0.12 * vy / VY_MAX
+            + yaw_sign * 0.06 * wz / WZ_MAX
+        )
         targets.extend([hip, thigh, calf])
 
     return np.array(targets)

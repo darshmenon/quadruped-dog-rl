@@ -14,13 +14,11 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 
 **Go2 is the only fully working robot** — real URDF, meshes, and both locomotion backends. The `urdf/{go1,spot,mini_cheetah,mini_pupper,anymal_b,anymal_c}_config/` folders are CHAMP gait/joint-layout config stubs carried over from upstream CHAMP examples: no URDF or mesh files are vendored, each references an external `*_description` ROS1(!) package by `$(find ...)` that isn't included in this repo, so none of them spawn as-is. Treat them as a starting point for wiring up a new robot, not as ready-to-run.
 
+![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
+
+![Go2 2D SLAM map of a room in RViz](docs/images/go2_slam_2d_room.png)
+
 ![Go2 walking under Quad-SDK NMPC control](docs/images/go2_walking.gif)
-
-![Unitree Go2 in RViz2](docs/images/go2_rviz2.png)
-
-![Unitree Go2 in Gazebo Harmonic](docs/images/go2_gazebo.png)
-
-![Go2 with manipulator arm mounted, in Gazebo](docs/images/go2_manipulator_arm.png)
 
 ---
 
@@ -530,6 +528,8 @@ source ros2/install/setup.bash
 ros2 launch launch/slam_go2.launch.py
 ```
 * **Topics:** Subscribes to `/scan` (from the 360-degree Gazebo LiDAR) and `/tf`. Publishes the 2D occupancy grid to `/map`.
+
+![Go2 2D SLAM map of a room in RViz](docs/images/go2_slam_2d_room.png)
 
 The Gazebo stand/gait node subscribes to `/cmd_vel` and converts velocity
 commands into the same Gazebo joint target topics used by teleop. Full autonomous

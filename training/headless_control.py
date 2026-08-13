@@ -57,8 +57,11 @@ L2 = 0.213   # calf link length (m)
 # implied by THIGH_DEFAULT/CALF_DEFAULT via forward kinematics, so gait IK
 # doesn't snap the legs on the stand->walk transition.
 PZ_NOM = 0.306   # m, downward from hip to foot contact point
+# Match stand-pose FK so gait doesn't yank rear feet forward-biased hips.
+PX_NOM = np.array([0.016, 0.016, 0.077, 0.077], dtype=np.float64)
 
 STRIDE_LEN = 0.14   # m stride at maximum speed
+YAW_STRIDE_GAIN = 0.08
 
 VX_MAX = 1.2
 VX_MIN = -0.6
@@ -107,7 +110,8 @@ def _leg_ik(px: float, pz: float) -> tuple:
 # --------------------------------------------------------------------------- #
 
 def _foot_target(phi: float, stride: float,
-                 duty_factor: float, step_height: float) -> tuple:
+                 duty_factor: float, step_height: float,
+                 px_nom: float = 0.0) -> tuple:
     """
     phi in [0, 2π).  duty_factor splits stance (first portion) from swing.
     Stance: foot slides backward (body advances).
@@ -116,11 +120,11 @@ def _foot_target(phi: float, stride: float,
     boundary = duty_factor * 2.0 * np.pi
     if phi < boundary:
         t  = phi / boundary
-        px = stride * (0.5 - t)
+        px = px_nom + stride * (0.5 - t)
         pz = PZ_NOM
     else:
         t  = (phi - boundary) / (2.0 * np.pi - boundary)
-        px = stride * (-0.5 + t)
+        px = px_nom + stride * (-0.5 + t)
         pz = PZ_NOM - step_height * np.sin(t * np.pi)
     return px, pz
 
@@ -157,13 +161,17 @@ def gait_ctrl(leg_phases: np.ndarray, cmd: np.ndarray, gait_params) -> np.ndarra
         phi = leg_phases[i]
 
         yaw_sign   = 1.0 if (i % 2 == 1) else -1.0
-        leg_stride = stride + yaw_sign * 0.03 * wz
+        leg_stride = stride + yaw_sign * YAW_STRIDE_GAIN * wz
 
-        px, pz = _foot_target(phi, leg_stride, duty, step_h)
+        px, pz = _foot_target(phi, leg_stride, duty, step_h, float(PX_NOM[i]))
         thigh_i, calf_i = _leg_ik(px, pz)
 
         lat_sign  = 1.0 if (i % 2 == 0) else -1.0
-        hips[i]   = HIP_DEFAULT[i] + lat_sign * 0.12 * vy / VY_MAX
+        hips[i]   = (
+            HIP_DEFAULT[i]
+            + lat_sign * 0.12 * vy / VY_MAX
+            + yaw_sign * 0.06 * wz / WZ_MAX
+        )
         thighs[i] = thigh_i
         calves[i] = calf_i
 

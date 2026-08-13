@@ -44,6 +44,9 @@ POSE_CHECK_PERIOD_S = 0.5
 MIN_BASE_Z = 0.18
 ROLL_KP = 0.18
 PITCH_KP = 0.16
+# Cancel measured yaw rate when walking straight (open-loop gait drifts).
+YAW_RATE_KP = 0.55
+YAW_RATE_MAX = 0.35
 
 
 def _gz_service(service, reqtype, reptype, request, timeout=3000):
@@ -71,6 +74,7 @@ class StandPublisher(Node):
         self._last_pose_check_time = 0.0
         self._roll = 0.0
         self._pitch = 0.0
+        self._yaw_rate = 0.0
         self._scheduler = GaitScheduler()
         self._cycle_phase = 0.0
         self._pubs = {
@@ -82,9 +86,9 @@ class StandPublisher(Node):
 
     def _cmd_cb(self, msg):
         self._cmd[:] = [
-            float(np.clip(msg.linear.x, -0.15, 0.25)),
-            float(np.clip(msg.linear.y, -0.12, 0.12)),
-            float(np.clip(msg.angular.z, -0.25, 0.25)),
+            float(np.clip(msg.linear.x, -0.20, 0.35)),
+            float(np.clip(msg.linear.y, -0.15, 0.15)),
+            float(np.clip(msg.angular.z, -0.40, 0.40)),
         ]
         self._last_cmd_time = time.monotonic()
 
@@ -96,12 +100,22 @@ class StandPublisher(Node):
 
         sinp = 2.0 * (q.w * q.y - q.z * q.x)
         self._pitch = float(np.arcsin(np.clip(sinp, -1.0, 1.0)))
+        self._yaw_rate = float(msg.angular_velocity.z)
 
     def _cmd_is_active(self):
         if time.monotonic() - self._last_cmd_time > COMMAND_TIMEOUT_S:
             self._cmd[:] = 0.0
             return False
         return float(np.linalg.norm(self._cmd)) >= 1.0e-4
+
+    def _gait_cmd(self):
+        """Command seen by the gait generator, with yaw-rate anti-drift."""
+        cmd = self._cmd.copy()
+        yaw_err = self._yaw_rate - cmd[2]
+        cmd[2] = float(np.clip(
+            cmd[2] - YAW_RATE_KP * yaw_err, -YAW_RATE_MAX, YAW_RATE_MAX
+        ))
+        return cmd
 
     def _apply_posture_feedback(self, targets):
         corrected = np.array(targets, dtype=np.float64)
@@ -194,7 +208,8 @@ class StandPublisher(Node):
         if not self._cmd_is_active():
             targets = list(JOINT_TARGETS.values())
         else:
-            speed = float(np.hypot(self._cmd[0], self._cmd[2] * 0.3))
+            gait_cmd = self._gait_cmd()
+            speed = float(np.hypot(gait_cmd[0], gait_cmd[2] * 0.3))
             gait = self._scheduler.get_gait_params(speed)
             self._cycle_phase = (
                 self._cycle_phase + 2.0 * np.pi * gait.frequency * CTRL_DT
@@ -202,7 +217,7 @@ class StandPublisher(Node):
             leg_phases = (
                 self._cycle_phase + np.array(gait.phase_offsets) * 2.0 * np.pi
             ) % (2.0 * np.pi)
-            targets = np.clip(_joint_targets(leg_phases, self._cmd, gait), -2.7, 2.7)
+            targets = np.clip(_joint_targets(leg_phases, gait_cmd, gait), -2.7, 2.7)
 
         targets = self._apply_posture_feedback(targets)
         for pub, target in zip(self._pubs.values(), targets):

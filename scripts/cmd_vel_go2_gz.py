@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from intelligence.gait.gait_scheduler import GaitScheduler
-from teleop_go2_gz import JOINTS, CTRL_DT, GAITS, Gait, _joint_targets
+from teleop_go2_gz import JOINTS, CTRL_DT, VX_MAX, VX_MIN, VY_MAX, WZ_MAX, _joint_targets
 
 
 class CmdVelGo2(Node):
@@ -28,7 +28,11 @@ class CmdVelGo2(Node):
         self.create_subscription(Twist, "/cmd_vel", self._cmd_cb, 10)
 
     def _cmd_cb(self, msg):
-        self._cmd[:] = [msg.linear.x, msg.linear.y, msg.angular.z]
+        self._cmd[:] = [
+            float(np.clip(msg.linear.x, VX_MIN, VX_MAX)),
+            float(np.clip(msg.linear.y, -VY_MAX, VY_MAX)),
+            float(np.clip(msg.angular.z, -WZ_MAX, WZ_MAX)),
+        ]
 
     def publish_targets(self):
         speed = float(np.hypot(self._cmd[0], self._cmd[2] * 0.3))

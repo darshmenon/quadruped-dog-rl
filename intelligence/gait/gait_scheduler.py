@@ -40,8 +40,12 @@ class GaitParams:
 
 GAITS = {
     Gait.STAND:  GaitParams("stand",  0.0, 1.00, [0.0, 0.0, 0.0, 0.0],  (0.0, 0.05)),
-    Gait.WALK:   GaitParams("walk",   1.2, 0.75, [0.0, 0.5, 0.25, 0.75],(0.05, 0.4)),
-    Gait.TROT:   GaitParams("trot",   2.0, 0.60, [0.0, 0.5, 0.5, 0.0],  (0.4, 1.5)),
+    # Crawl walk: FL → RR → FR → RL. Old [0, 0.5, 0.25, 0.75] swung both
+    # left legs then both right legs, which yawed/drifted every cycle.
+    Gait.WALK:   GaitParams("walk",   1.4, 0.75, [0.0, 0.5, 0.75, 0.25],(0.05, 0.35)),
+    # Prefer trot once the robot is actually moving — more stable than crawl
+    # at the speeds Gazebo teleop can command after clipping.
+    Gait.TROT:   GaitParams("trot",   2.0, 0.60, [0.0, 0.5, 0.5, 0.0],  (0.35, 1.5)),
     Gait.CANTER: GaitParams("canter", 2.8, 0.55, [0.0, 0.33, 0.66, 0.2],(1.5, 2.5)),
     Gait.BOUND:  GaitParams("bound",  3.5, 0.40, [0.0, 0.0, 0.5, 0.5],  (2.5, 4.0)),
     Gait.PRONK:  GaitParams("pronk",  3.0, 0.30, [0.0, 0.0, 0.0, 0.0],  (4.0, 6.0)),
