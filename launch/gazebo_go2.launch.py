@@ -103,7 +103,22 @@ def generate_launch_description():
         ],
         remappings=[
             ('/world/empty/model/go2/joint_state', 'joint_states'),
+            ('/scan', '/scan_raw'),
         ]
+    )
+
+    # Filters raw lidar noise (near-range/shadow points) before AMCL, SLAM
+    # Toolbox, and the Nav2 costmaps see it. See config/laser_filters.yaml.
+    laser_filter = Node(
+        package='laser_filters',
+        executable='scan_to_scan_filter_chain',
+        name='scan_to_scan_filter_chain',
+        output='screen',
+        parameters=[os.path.join(REPO_ROOT, 'config', 'laser_filters.yaml')],
+        remappings=[
+            ('scan', '/scan_raw'),
+            ('scan_filtered', '/scan'),
+        ],
     )
 
     rviz_config = os.path.join(
@@ -126,5 +141,6 @@ def generate_launch_description():
         robot_state_publisher,
         spawn_robot,
         bridge,
+        laser_filter,
         rviz2,
     ])
