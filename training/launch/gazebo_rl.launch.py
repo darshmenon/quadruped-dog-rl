@@ -34,6 +34,29 @@ def generate_launch_description():
     world_arg = DeclareLaunchArgument("world", default_value=str(DEFAULT_WORLD))
     stand_duration_arg = DeclareLaunchArgument("stand_duration", default_value="-1.0")
     enable_arm_reach_arg = DeclareLaunchArgument("enable_arm_reach", default_value="false")
+    enable_lidar3d_arg = DeclareLaunchArgument(
+        "enable_lidar3d", default_value="true",
+        description="Bridge the lidar3d gpu_lidar's PointCloud2 to /points, for Nav2's 3D "
+                    "obstacle costmap source (see config/go2_navigation.yaml) and rtabmap_slam. "
+                    "Off by default only makes sense if something else is already bridging "
+                    "/points (e.g. launch/slam3d_go2.launch.py does its own).")
+    enable_octomap_arg = DeclareLaunchArgument(
+        "enable_octomap", default_value="true",
+        description="Run octomap_server on /points, building a persistent 3D occupancy map "
+                    "and publishing /projected_map for Nav2's octomap_layer (StaticLayer) in "
+                    "config/go2_navigation.yaml. Requires enable_lidar3d and a 'map' TF (Nav2's "
+                    "AMCL) to actually integrate scans -- harmless no-op without either.")
+    ros_domain_id_arg = DeclareLaunchArgument(
+        "ros_domain_id", default_value="177",
+        description="ROS_DOMAIN_ID for this launch tree, isolated from other concurrent "
+                    "ROS2 workspaces on this machine (quad_sdk's real-robot scripts hardcode "
+                    "42, launch/slam3d_go2.launch.py uses 157).")
+    gz_partition_arg = DeclareLaunchArgument(
+        "gz_partition", default_value="go2rltrain",
+        description="GZ_PARTITION for this launch tree's Gazebo transport, isolated from "
+                    "any other gz sim instance running concurrently.")
+    ros_domain_id = LaunchConfiguration("ros_domain_id")
+    gz_partition = LaunchConfiguration("gz_partition")
 
     # go2_gz.urdf's manipulator arm links (see
     # ros2/champ_description/urdf/arm.urdf.xacro) use package://champ_description
@@ -54,6 +77,12 @@ def generate_launch_description():
         world_arg,
         stand_duration_arg,
         enable_arm_reach_arg,
+        enable_lidar3d_arg,
+        enable_octomap_arg,
+        ros_domain_id_arg,
+        gz_partition_arg,
+        SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id),
+        SetEnvironmentVariable("GZ_PARTITION", gz_partition),
         gz_resource_path,
         OpaqueFunction(function=_launch_setup),
     ])
@@ -64,6 +93,8 @@ def _launch_setup(context, *args, **kwargs):
     world = LaunchConfiguration("world").perform(context)
     stand_duration = LaunchConfiguration("stand_duration").perform(context)
     enable_arm_reach = LaunchConfiguration("enable_arm_reach").perform(context).lower() == "true"
+    enable_lidar3d = LaunchConfiguration("enable_lidar3d").perform(context).lower() == "true"
+    enable_octomap = LaunchConfiguration("enable_octomap").perform(context).lower() == "true"
     gz_args = f"{'-s ' if headless else ''}{world}"
     subprocess.run([
         "python3",
@@ -144,8 +175,22 @@ def _launch_setup(context, *args, **kwargs):
         package="ros_gz_bridge",
         executable="parameter_bridge",
         arguments=bridge_args,
-        remappings=[("/world/go2_rl/model/go2/joint_state", "/joint_states")],
+        remappings=[
+            ("/world/go2_rl/model/go2/joint_state", "/joint_states"),
+            ("/scan", "/scan_raw"),
+        ],
         parameters=[{"use_sim_time": True}],
+        output="screen",
+    )
+
+    # Filters raw lidar noise (near-range/shadow points) before AMCL, SLAM
+    # Toolbox, and the Nav2 costmaps see it. See config/laser_filters.yaml.
+    laser_filter = Node(
+        package="laser_filters",
+        executable="scan_to_scan_filter_chain",
+        name="scan_to_scan_filter_chain",
+        parameters=[str(REPO / "config" / "laser_filters.yaml"), {"use_sim_time": True}],
+        remappings=[("scan", "/scan_raw"), ("scan_filtered", "/scan")],
         output="screen",
     )
 
@@ -183,6 +228,7 @@ def _launch_setup(context, *args, **kwargs):
         # not-yet-settled world and it faceplants immediately.
         TimerAction(period=5.0, actions=[spawn]),
         bridge,
+        laser_filter,
         # Extra buffer past spawn before touching the entity: the heavier
         # multi-terrain world can still be inserting the ~65 static terrain
         # models into the ECS a couple seconds after "OK creation of entity"
@@ -197,5 +243,47 @@ def _launch_setup(context, *args, **kwargs):
         # Start after `stand` (period=9.0) has issued its own arm command
         # (STOW_POSE) so arm_reach_node's first /arm/target message wins.
         actions.append(TimerAction(period=11.0, actions=[arm_reach]))
+
+    if enable_lidar3d:
+        # gpu_lidar always publishes LaserScan on its own <topic> and the
+        # actual PointCloud2 on a nested "<topic>/points" -- see the lidar3d
+        # sensor comment in go2_gz.urdf. Same bridge launch/slam3d_go2.launch.py
+        # uses for its own (quad_sdk-path) points_bridge.
+        points_bridge = Node(
+            package="ros_gz_bridge",
+            executable="parameter_bridge",
+            name="points_bridge",
+            arguments=["/points/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked"],
+            remappings=[("/points/points", "/points")],
+            parameters=[{"use_sim_time": True}],
+            output="screen",
+        )
+        actions.append(TimerAction(period=5.0, actions=[points_bridge]))
+
+        if enable_octomap:
+            # Builds a persistent 3D occupancy map from /points and publishes
+            # /projected_map (2D OccupancyGrid) for Nav2's octomap_layer
+            # (StaticLayer, see config/go2_navigation.yaml). frame_id is
+            # "map" per octomap_server's own guidance ("set to 'map' if SLAM
+            # or localization running") -- needs AMCL's map->odom TF, so this
+            # is inert (no error, just no integration) until nav2_go2.launch.py
+            # is also up.
+            octomap_server = Node(
+                package="octomap_server",
+                executable="octomap_server_node",
+                name="octomap_server",
+                parameters=[{
+                    "use_sim_time": True,
+                    "resolution": 0.05,
+                    "frame_id": "map",
+                    "base_frame_id": "base",
+                    "sensor_model.max_range": 8.0,
+                }],
+                remappings=[("cloud_in", "/points")],
+                output="screen",
+            )
+            # A few seconds after points_bridge (5.0) so /points is already
+            # flowing before octomap_server's first cloud callback.
+            actions.append(TimerAction(period=8.0, actions=[octomap_server]))
 
     return actions

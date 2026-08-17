@@ -3,7 +3,19 @@
 Usage:
     source /opt/ros/humble/setup.bash
     source ros2/install/setup.bash
-    ros2 launch launch/champ_go2_gazebo.launch.py
+    ros2 launch launch/champ_go2_gazebo.launch.py headless:=true state_estimation:=true
+
+Verify each piece came up (ROS_DOMAIN_ID=177 is gazebo_rl.launch.py's default):
+    ros2 topic hz /joint_states        # champ + adapter driving the robot
+    ros2 topic hz /scan                # lidar bridge -> laser_filters -> /scan
+    ros2 topic hz /points              # lidar3d bridge (enable_lidar3d:=true, default)
+    ros2 topic echo /odom --once       # state_estimation EKF (needs state_estimation:=true)
+    ros2 node list | grep octomap      # octomap_server (enable_octomap:=true, default)
+
+Then layer Nav2 on top (same ROS_DOMAIN_ID) and check its plugins loaded/activated:
+    ros2 launch launch/nav2_go2.launch.py use_sim_time:=true
+    ros2 topic echo /projected_map --field info --once   # octomap_layer's source (global costmap)
+    ros2 topic hz /amcl_pose
 """
 
 import os
