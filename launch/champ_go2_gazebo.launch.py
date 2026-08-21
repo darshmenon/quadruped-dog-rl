@@ -3,9 +3,12 @@
 Usage:
     source /opt/ros/humble/setup.bash
     source ros2/install/setup.bash
-    ros2 launch launch/champ_go2_gazebo.launch.py headless:=true state_estimation:=true
+    ros2 launch launch/champ_go2_gazebo.launch.py headless:=true state_estimation:=true \
+        ros_domain_id:=193 gz_partition:=go2check
 
-Verify each piece came up (ROS_DOMAIN_ID=177 is gazebo_rl.launch.py's default):
+Verify each piece came up (defaults to ROS_DOMAIN_ID=177, gz_partition=go2rltrain, same
+as gazebo_rl.launch.py -- override both with ros_domain_id:=/gz_partition:= to isolate
+from other concurrent runs on this machine):
     ros2 topic hz /joint_states        # champ + adapter driving the robot
     ros2 topic hz /scan                # lidar bridge -> laser_filters -> /scan
     ros2 topic hz /points              # lidar3d bridge (enable_lidar3d:=true, default)
@@ -40,6 +43,8 @@ def generate_launch_description():
     rviz = LaunchConfiguration("rviz")
     world = LaunchConfiguration("world")
     state_estimation = LaunchConfiguration("state_estimation")
+    ros_domain_id = LaunchConfiguration("ros_domain_id")
+    gz_partition = LaunchConfiguration("gz_partition")
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -49,6 +54,8 @@ def generate_launch_description():
             "headless": headless,
             "world": world,
             "stand_duration": "2.0",
+            "ros_domain_id": ros_domain_id,
+            "gz_partition": gz_partition,
         }.items(),
     )
 
@@ -110,6 +117,16 @@ def generate_launch_description():
             description="Launch CHAMP's state_estimation_node + odom/footprint EKF "
                         "chain (needed for Nav2; off by default since the RL/"
                         "joint-control path doesn't use it).",
+        ),
+        DeclareLaunchArgument(
+            "ros_domain_id", default_value="177",
+            description="Forwarded to gazebo_rl.launch.py -- isolate this launch tree's "
+                        "ROS_DOMAIN_ID from other concurrent runs on this machine.",
+        ),
+        DeclareLaunchArgument(
+            "gz_partition", default_value="go2rltrain",
+            description="Forwarded to gazebo_rl.launch.py -- isolate this launch tree's "
+                        "GZ_PARTITION from other concurrent gz sim instances.",
         ),
         gazebo,
         # stand now runs at t=9s for 2s (see training/launch/gazebo_rl.launch.py),
