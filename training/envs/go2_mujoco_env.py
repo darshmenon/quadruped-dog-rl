@@ -46,12 +46,37 @@ ACT_DEFAULT = np.array([
 # 3 ang_vel + 3 gravity + 3 cmd + 19 dof_pos + 19 dof_vel + 19 prev_action
 # + 4 contacts + 3 ee_pos + 3 reach_target
 OBS_DIM = 76
+# When gait_conditioned=True, append: 5 gait params + 4 foot clock sins
+# (freq, phase, offset, bound, footswing_height, clock_FL/FR/RL/RR)
+GAIT_OBS_DIM = 9
 ACT_DIM = 19
 ACT_SCALE = 0.25
 
 EPISODE_LEN_S = 20.0
 SIM_DT = 0.005
 CTRL_DECIMATION = 4   # policy at 50 Hz, sim at 200 Hz
+CTRL_DT = SIM_DT * CTRL_DECIMATION
+
+# Named gait presets: (phase, offset, bound). Duration is fixed at 0.5
+# (half the cycle in stance). Trotting is the default curriculum sample.
+GAIT_PRESETS = {
+    "trotting": (0.5, 0.0, 0.0),
+    "bounding": (0.0, 0.0, 0.5),
+    "pacing":   (0.0, 0.5, 0.0),
+    "pronking": (0.0, 0.0, 0.0),
+}
+GAIT_FREQ_RANGE = (1.5, 3.5)       # Hz
+GAIT_FOOTSWING_RANGE = (0.04, 0.18)  # metres, command only (clearance cue)
+GAIT_CONTACT_WEIGHT = 0.25
+GAIT_CONTACT_KAPPA = 0.08          # soft-step width for desired contact
+
+# Step-quality terms (air-time encourages real strides; slip penalizes
+# sliding while planted). Only score air-time when a nontrivial velocity
+# command is active so standing still is not rewarded for "long stance".
+AIR_TIME_TARGET_S = 0.25
+AIR_TIME_WEIGHT = 0.35
+FEET_SLIP_WEIGHT = 0.12
+CONTACT_FORCE_THRESH = 0.3  # after /50 clip, ~15 N raw touch
 
 TARGET_HEIGHT = 0.27  # nominal base height above ground while standing
 
@@ -106,7 +131,8 @@ class Go2MujocoEnv(gym.Env):
 
     def __init__(self, cmd=(0.5, 0.0, 0.0), render_mode=None,
                  randomize_domain=True, use_curriculum=True,
-                 initial_curriculum_level=0.0, reach_target=None):
+                 initial_curriculum_level=0.0, reach_target=None,
+                 gait_conditioned=False, gait_name="trotting"):
         super().__init__()
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
         self.data = mujoco.MjData(self.model)
@@ -116,6 +142,7 @@ class Go2MujocoEnv(gym.Env):
         self.render_mode = render_mode
         self.randomize_domain = randomize_domain
         self.use_curriculum = use_curriculum
+        self.gait_conditioned = bool(gait_conditioned)
         self._renderer = None
         self._prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._step_count = 0
@@ -133,6 +160,13 @@ class Go2MujocoEnv(gym.Env):
             else ARM_MOUNT_POS + np.array([0.3, 0.0, 0.0], dtype=np.float32)
         )
 
+        # Gait command: [freq_hz, phase, offset, bound, footswing_m].
+        # Clocks and desired contacts are derived each step from these.
+        self._gait_index = 0.0
+        self._clock_inputs = np.zeros(4, dtype=np.float32)
+        self._desired_contact = np.ones(4, dtype=np.float32)
+        self.gait_cmd = self._default_gait_cmd(gait_name)
+
         # cache original model params for domain randomization
         self._base_body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
@@ -143,7 +177,17 @@ class Go2MujocoEnv(gym.Env):
         self._base_gainprm = self.model.actuator_gainprm[:, 0].copy()
         self._base_biasprm1 = self.model.actuator_biasprm[:, 1].copy()
 
-        obs_high = np.full(OBS_DIM, np.inf, dtype=np.float32)
+        # Foot bodies for air-time / slip rewards (FL, FR, RL, RR).
+        self._foot_body_ids = np.array([
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, n)
+            for n in ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
+        ], dtype=np.int32)
+        self._feet_air_time = np.zeros(4, dtype=np.float32)
+        self._last_contacts = np.zeros(4, dtype=bool)
+        self._foot_vel_buf = np.zeros(6, dtype=np.float64)
+
+        obs_dim = OBS_DIM + (GAIT_OBS_DIM if self.gait_conditioned else 0)
+        obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(ACT_DIM,), dtype=np.float32)
@@ -166,6 +210,95 @@ class Go2MujocoEnv(gym.Env):
             dtype=np.float32)
         return np.clip(raw / 50.0, 0.0, 1.0)
 
+    def _foot_lin_vels(self) -> np.ndarray:
+        """World-frame linear velocity of each foot body, shape (4, 3)."""
+        out = np.empty((4, 3), dtype=np.float32)
+        for i, bid in enumerate(self._foot_body_ids):
+            mujoco.mj_objectVelocity(
+                self.model, self.data, mujoco.mjtObj.mjOBJ_BODY,
+                int(bid), self._foot_vel_buf, 0)
+            out[i] = self._foot_vel_buf[:3]
+        return out
+
+    def _air_time_and_slip(self, contacts: np.ndarray):
+        """Update air-time clocks; return (air_time_reward, slip_penalty)."""
+        in_contact = contacts > CONTACT_FORCE_THRESH
+        contact_filt = np.logical_or(in_contact, self._last_contacts)
+        first_contact = (self._feet_air_time > 0.0) & contact_filt
+
+        self._feet_air_time += CTRL_DT
+        air = 0.0
+        cmd_speed = float(np.hypot(self.cmd[0], self.cmd[1]))
+        if cmd_speed > 0.1 and np.any(first_contact):
+            # Reward strides that stay aloft near AIR_TIME_TARGET_S.
+            air = AIR_TIME_WEIGHT * float(np.sum(
+                (self._feet_air_time - AIR_TIME_TARGET_S) * first_contact))
+
+        self._feet_air_time = np.where(contact_filt, 0.0, self._feet_air_time)
+        self._last_contacts = in_contact
+
+        # Penalize horizontal foot velocity while planted.
+        foot_vel = self._foot_lin_vels()
+        slip_speeds = np.linalg.norm(foot_vel[:, :2], axis=1)
+        slip = -FEET_SLIP_WEIGHT * float(np.sum(slip_speeds * in_contact))
+        return air, slip
+
+    def _default_gait_cmd(self, gait_name: str) -> np.ndarray:
+        phase, offset, bound = GAIT_PRESETS.get(gait_name, GAIT_PRESETS["trotting"])
+        freq = 0.5 * (GAIT_FREQ_RANGE[0] + GAIT_FREQ_RANGE[1])
+        swing = 0.5 * (GAIT_FOOTSWING_RANGE[0] + GAIT_FOOTSWING_RANGE[1])
+        return np.array([freq, phase, offset, bound, swing], dtype=np.float32)
+
+    def _sample_gait_cmd(self) -> np.ndarray:
+        """Sample a gait style + frequency. Early curriculum stays on
+        trotting; higher levels mix in bounding/pacing/pronking."""
+        rng = self.np_random
+        if self.curriculum_level < 0.35:
+            name = "trotting"
+        else:
+            names = list(GAIT_PRESETS.keys())
+            # Bias toward trotting even late in curriculum.
+            weights = [0.55, 0.2, 0.15, 0.1]
+            name = names[int(rng.choice(len(names), p=weights))]
+        phase, offset, bound = GAIT_PRESETS[name]
+        freq_lo, freq_hi = GAIT_FREQ_RANGE
+        freq = float(rng.uniform(freq_lo, freq_lo + (freq_hi - freq_lo) * max(
+            0.4, self.curriculum_level)))
+        swing_lo, swing_hi = GAIT_FOOTSWING_RANGE
+        swing = float(rng.uniform(swing_lo, swing_lo + (swing_hi - swing_lo) * max(
+            0.3, self.curriculum_level)))
+        return np.array([freq, phase, offset, bound, swing], dtype=np.float32)
+
+    def _step_gait(self) -> None:
+        """Advance gait phase and refresh clock / desired-contact targets."""
+        if not self.gait_conditioned:
+            return
+        freq, phase, offset, bound, _swing = self.gait_cmd
+        duration = 0.5
+        self._gait_index = (self._gait_index + CTRL_DT * float(freq)) % 1.0
+        # Per-foot phase offsets: FL, FR, RL, RR
+        foot_phases = np.array([
+            self._gait_index + phase + offset + bound,
+            self._gait_index + offset,
+            self._gait_index + bound,
+            self._gait_index + phase,
+        ], dtype=np.float64) % 1.0
+
+        clocks = np.empty(4, dtype=np.float32)
+        desired = np.empty(4, dtype=np.float32)
+        kappa = GAIT_CONTACT_KAPPA
+        for i, p in enumerate(foot_phases):
+            # Warp so stance occupies [0, 0.5) and swing [0.5, 1).
+            if p < duration:
+                warped = p * (0.5 / duration)
+            else:
+                warped = 0.5 + (p - duration) * (0.5 / (1.0 - duration))
+            clocks[i] = np.sin(2.0 * np.pi * warped)
+            # Soft stance indicator: high in first half of warped cycle.
+            desired[i] = 1.0 / (1.0 + np.exp((warped - 0.5) / kappa))
+        self._clock_inputs = clocks
+        self._desired_contact = desired
+
     def _get_obs(self) -> np.ndarray:
         d = self.data
         ang_vel   = d.sensor("ang_vel").data.astype(np.float32) * 0.25
@@ -180,9 +313,21 @@ class Go2MujocoEnv(gym.Env):
         # vector, matching how dof_pos/cmd are split into achieved vs.
         # desired elsewhere in this observation.
         ee_pos    = d.sensor("ee_pos").data.astype(np.float32)
-        return np.concatenate(
-            [ang_vel, gravity, cmd_scaled, dof_pos, dof_vel, self._prev_action,
-             contacts, ee_pos, self.reach_target])
+        parts = [
+            ang_vel, gravity, cmd_scaled, dof_pos, dof_vel, self._prev_action,
+            contacts, ee_pos, self.reach_target,
+        ]
+        if self.gait_conditioned:
+            # Normalize freq into roughly [-1, 1]-ish range for the MLP.
+            freq_n = (self.gait_cmd[0] - GAIT_FREQ_RANGE[0]) / (
+                GAIT_FREQ_RANGE[1] - GAIT_FREQ_RANGE[0] + 1e-6)
+            swing_n = self.gait_cmd[4] / GAIT_FOOTSWING_RANGE[1]
+            gait_feat = np.array(
+                [freq_n, self.gait_cmd[1], self.gait_cmd[2], self.gait_cmd[3],
+                 swing_n],
+                dtype=np.float32)
+            parts.extend([gait_feat, self._clock_inputs])
+        return np.concatenate(parts)
 
     def _compute_reward(self, action: np.ndarray):
         d = self.data
@@ -216,12 +361,22 @@ class Go2MujocoEnv(gym.Env):
         actual_speed = float(np.hypot(lin_vel[0], lin_vel[1]))
         r_stall = -0.6 if (cmd_speed > 0.15 and actual_speed < 0.3 * cmd_speed) else 0.0
 
+        r_air, r_slip = self._air_time_and_slip(contacts)
+
         components = dict(
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
             stall=r_stall, alive=ALIVE_BONUS,
             reach=r_reach, reach_dense=r_reach_dense, reach_bonus=r_reach_bonus,
+            air_time=r_air, slip=r_slip,
         )
+
+        if self.gait_conditioned:
+            # Match measured contacts to the commanded gait's stance/swing.
+            # contacts are already in [0,1]; desired_contact is soft [0,1].
+            match = 1.0 - np.abs(contacts - self._desired_contact)
+            components["gait_contact"] = GAIT_CONTACT_WEIGHT * float(np.mean(match))
+
         return float(sum(components.values())), components
 
     def _sample_cmd(self) -> np.ndarray:
@@ -294,6 +449,8 @@ class Go2MujocoEnv(gym.Env):
                 0.0, MAX_CURRICULUM_LEVEL))
             self.cmd = self._sample_cmd()
             self.reach_target = self._sample_reach_target()
+            if self.gait_conditioned:
+                self.gait_cmd = self._sample_gait_cmd()
 
         mujoco.mj_resetData(self.model, self.data)
         self._apply_domain_rand()
@@ -312,6 +469,10 @@ class Go2MujocoEnv(gym.Env):
         self._prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._step_count = 0
         self._last_episode_steps = 0
+        self._gait_index = 0.0
+        self._feet_air_time[:] = 0.0
+        self._last_contacts[:] = False
+        self._step_gait()
         return self._get_obs(), {}
 
     def step(self, action):
@@ -320,6 +481,7 @@ class Go2MujocoEnv(gym.Env):
         for _ in range(CTRL_DECIMATION):
             mujoco.mj_step(self.model, self.data)
 
+        self._step_gait()
         reward, components = self._compute_reward(action)
         self._prev_action = action.copy()
         self._step_count += 1
@@ -357,12 +519,22 @@ class Go2MujocoEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = Go2MujocoEnv(render_mode=None, randomize_domain=False, use_curriculum=False)
-    obs, _ = env.reset(seed=0)
-    print("obs shape:", obs.shape)
-    assert obs.shape == (OBS_DIM,), f"expected {OBS_DIM}, got {obs.shape[0]}"
-    for _ in range(200):
-        obs, r, term, trunc, _ = env.step(env.action_space.sample())
-        if term or trunc:
-            obs, _ = env.reset()
-    print("env smoke-test passed")
+    for gait in (False, True):
+        env = Go2MujocoEnv(render_mode=None, randomize_domain=False,
+                           use_curriculum=False, gait_conditioned=gait)
+        obs, _ = env.reset(seed=0)
+        expected = OBS_DIM + (GAIT_OBS_DIM if gait else 0)
+        print(f"gait_conditioned={gait}: obs shape {obs.shape}")
+        assert obs.shape == (expected,), f"expected {expected}, got {obs.shape[0]}"
+        saw_air = False
+        for _ in range(200):
+            obs, r, term, trunc, info = env.step(env.action_space.sample())
+            comps = info["reward_components"]
+            assert "air_time" in comps and "slip" in comps
+            if gait:
+                assert "gait_contact" in comps
+            if comps["air_time"] != 0.0:
+                saw_air = True
+            if term or trunc:
+                obs, _ = env.reset()
+        print(f"gait_conditioned={gait}: smoke-test passed (air_nonzero={saw_air})")

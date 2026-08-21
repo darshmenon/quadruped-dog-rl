@@ -1,0 +1,232 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="go2_rl">
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Flat spawn / fall-recovery pad at origin -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Raised ledges / platforms (parkour-style climbs) -->
+    <model name="ledge_low">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>3.0000 0.0000 0.0600 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.5000 1.4000 0.1200</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.5000 1.4000 0.1200</size></box></geometry>
+          <material><ambient>0.45 0.55 0.7 1</ambient><diffuse>0.45 0.55 0.7 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="ledge_mid">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>5.5000 0.0000 0.1100 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.5000 1.4000 0.2200</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.5000 1.4000 0.2200</size></box></geometry>
+          <material><ambient>0.4 0.55 0.65 1</ambient><diffuse>0.4 0.55 0.65 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="ledge_high">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>8.0000 0.0000 0.1750 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.5000 1.4000 0.3500</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.5000 1.4000 0.3500</size></box></geometry>
+          <material><ambient>0.35 0.5 0.6 1</ambient><diffuse>0.35 0.5 0.6 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Gap crossings: two platforms with open air between -->
+    <model name="gap_a">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>11.0000 0.0000 0.0750 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.0000 1.2000 0.1500</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0000 1.2000 0.1500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="gap_b">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>12.4000 0.0000 0.0750 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.0000 1.2000 0.1500</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0000 1.2000 0.1500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wider gap (~0.55 m clear) -->
+    <model name="gap2_a">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>15.0000 0.0000 0.0900 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.0000 1.2000 0.1800</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0000 1.2000 0.1800</size></box></geometry>
+          <material><ambient>0.65 0.45 0.4 1</ambient><diffuse>0.65 0.45 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="gap2_b">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>16.5500 0.0000 0.0900 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>1.0000 1.2000 0.1800</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0000 1.2000 0.1800</size></box></geometry>
+          <material><ambient>0.65 0.45 0.4 1</ambient><diffuse>0.65 0.45 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Hollow stairs (open risers) — harder footholds -->
+    <model name="hollow_stairs">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="tread_1">
+        <pose>19.1400 0.0000 0.0775 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <material><ambient>0.7 0.45 0.35 1</ambient><diffuse>0.7 0.45 0.35 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="tread_2">
+        <pose>19.4200 0.0000 0.1775 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <material><ambient>0.7 0.45 0.35 1</ambient><diffuse>0.7 0.45 0.35 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="tread_3">
+        <pose>19.7000 0.0000 0.2775 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <material><ambient>0.7 0.45 0.35 1</ambient><diffuse>0.7 0.45 0.35 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="tread_4">
+        <pose>19.9800 0.0000 0.3775 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <material><ambient>0.7 0.45 0.35 1</ambient><diffuse>0.7 0.45 0.35 1</diffuse></material>
+        </visual>
+      </link>
+      <link name="tread_5">
+        <pose>20.2600 0.0000 0.4775 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2660 1.5000 0.0450</size></box></geometry>
+          <material><ambient>0.7 0.45 0.35 1</ambient><diffuse>0.7 0.45 0.35 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Side curb / sidewalk ledge -->
+    <model name="curb">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="deck">
+        <pose>4.0000 2.2000 0.0750 0 0 0</pose>
+        <collision name="collision">
+          <geometry><box><size>6.0000 0.3500 0.1500</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>6.0000 0.3500 0.1500</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

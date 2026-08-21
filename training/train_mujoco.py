@@ -27,6 +27,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import get_schedule_fn
 
 from envs.go2_mujoco_env import Go2MujocoEnv
+from envs.obs_history import ObsHistoryWrapper
 
 LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs", "mujoco")
 CKPT_DIR = os.path.join(LOG_DIR, "checkpoints")
@@ -91,11 +92,15 @@ class VecNormSaveCallback(BaseCallback):
 # Env factory
 # --------------------------------------------------------------------------- #
 
-def make_env(cmd, rank, seed=0, curriculum_level=0.0):
+def make_env(cmd, rank, seed=0, curriculum_level=0.0, gait_conditioned=False,
+             obs_history=1):
     def _init():
         env = Go2MujocoEnv(cmd=cmd, render_mode=None,
                            randomize_domain=True, use_curriculum=True,
-                           initial_curriculum_level=curriculum_level)
+                           initial_curriculum_level=curriculum_level,
+                           gait_conditioned=gait_conditioned)
+        if obs_history > 1:
+            env = ObsHistoryWrapper(env, history_len=obs_history)
         env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
@@ -124,38 +129,68 @@ def main():
     parser.add_argument("--vecnorm", type=str, default=None,
                         help="path to a VecNormalize .pkl to load with --resume; "
                              "defaults to the nearest-matching checkpoint by step count")
+    parser.add_argument("--gait", action="store_true",
+                        help="enable gait-conditioned commands (trotting/bounding/pacing/"
+                             "pronking clocks + contact-phase reward); uses a separate "
+                             "log dir so existing checkpoints stay valid")
+    parser.add_argument("--obs-history", type=int, default=1, metavar="N",
+                        help="stack the last N proprio frames into the observation "
+                             "(1 = disabled, recommended 5 for blind terrain inference)")
+    parser.add_argument("--log-dir", type=str, default=None,
+                        help="override training log directory")
     args = parser.parse_args()
 
-    os.makedirs(CKPT_DIR, exist_ok=True)
+    log_dir = args.log_dir
+    if log_dir is None:
+        suffix_parts = []
+        if args.gait:
+            suffix_parts.append("gait")
+        if args.obs_history > 1:
+            suffix_parts.append(f"hist{args.obs_history}")
+        log_dir = LOG_DIR if not suffix_parts else (
+            os.path.join(os.path.dirname(LOG_DIR), "mujoco_" + "_".join(suffix_parts)))
+    ckpt_dir = os.path.join(log_dir, "checkpoints")
+    curriculum_path = os.path.join(log_dir, "curriculum_level.txt")
+
+    os.makedirs(ckpt_dir, exist_ok=True)
     cmd = tuple(args.cmd)
 
     if args.curriculum_level is None:
-        if os.path.exists(CURRICULUM_PATH):
-            with open(CURRICULUM_PATH) as f:
+        if os.path.exists(curriculum_path):
+            with open(curriculum_path) as f:
                 args.curriculum_level = float(f.read().strip())
-            print(f"Loaded curriculum_level={args.curriculum_level:.3f} from {CURRICULUM_PATH}")
+            print(f"Loaded curriculum_level={args.curriculum_level:.3f} from {curriculum_path}")
         else:
             args.curriculum_level = 0.0
 
     print(f"Training Go2 (MuJoCo) | cmd={cmd} | envs={args.n_envs} | steps={args.timesteps} "
-          f"| curriculum_level={args.curriculum_level:.3f}")
+          f"| curriculum_level={args.curriculum_level:.3f} "
+          f"| gait={args.gait} | obs_history={args.obs_history} | log={log_dir}")
 
     # ---- training envs with obs + reward normalisation ----
-    vec_env = DummyVecEnv([make_env(cmd, i, curriculum_level=args.curriculum_level)
-                           for i in range(args.n_envs)])
+    vec_env = DummyVecEnv([
+        make_env(cmd, i, curriculum_level=args.curriculum_level,
+                 gait_conditioned=args.gait, obs_history=args.obs_history)
+        for i in range(args.n_envs)])
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
                            clip_obs=10.0, clip_reward=10.0)
 
     # ---- eval env: obs normalised (frozen), no reward norm, no domain rand ----
-    eval_raw = Monitor(Go2MujocoEnv(cmd=cmd, render_mode=None,
-                                    randomize_domain=False, use_curriculum=False))
-    eval_env = VecNormalize(DummyVecEnv([lambda: eval_raw]),
+    def _make_eval():
+        e = Go2MujocoEnv(cmd=cmd, render_mode=None,
+                         randomize_domain=False, use_curriculum=False,
+                         gait_conditioned=args.gait)
+        if args.obs_history > 1:
+            e = ObsHistoryWrapper(e, history_len=args.obs_history)
+        return Monitor(e)
+
+    eval_env = VecNormalize(DummyVecEnv([_make_eval]),
                             norm_obs=True, norm_reward=False, training=False)
 
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path=LOG_DIR,
-        log_path=LOG_DIR,
+        best_model_save_path=log_dir,
+        log_path=log_dir,
         eval_freq=50_000,
         n_eval_episodes=5,
         deterministic=True,
@@ -169,7 +204,7 @@ def main():
     # happened to also save that same step as a numbered checkpoint). Seed
     # it from the previous run's own evaluations.npz so only a genuine
     # improvement can overwrite the saved checkpoint.
-    prev_evals_path = os.path.join(LOG_DIR, "evaluations.npz")
+    prev_evals_path = os.path.join(log_dir, "evaluations.npz")
     if os.path.exists(prev_evals_path):
         prev_evals = np.load(prev_evals_path)
         if len(prev_evals["results"]) > 0:
@@ -179,10 +214,10 @@ def main():
 
     callbacks = [
         RewardComponentCallback(log_interval=1000),
-        CheckpointCallback(save_freq=50_000, save_path=CKPT_DIR,
+        CheckpointCallback(save_freq=50_000, save_path=ckpt_dir,
                            name_prefix="go2_mujoco"),
-        VecNormSaveCallback(vec_env, CKPT_DIR, save_freq=50_000,
-                            curriculum_path=CURRICULUM_PATH),
+        VecNormSaveCallback(vec_env, ckpt_dir, save_freq=50_000,
+                            curriculum_path=curriculum_path),
         eval_callback,
     ]
 
@@ -195,7 +230,7 @@ def main():
             # step counters)
             ckpt_stem   = os.path.basename(args.resume).replace(".zip", "")
             ckpt_steps  = int(ckpt_stem.split("_steps")[0].split("_")[-1])
-            candidates  = glob.glob(os.path.join(CKPT_DIR, "vecnorm_*_steps.pkl"))
+            candidates  = glob.glob(os.path.join(ckpt_dir, "vecnorm_*_steps.pkl"))
             if candidates:
                 def _steps(p):
                     return int(os.path.basename(p).split("_steps")[0].split("_")[-1])
@@ -207,7 +242,7 @@ def main():
         else:
             print("WARNING: no VecNormalize stats found to load — starting with fresh "
                   "obs/reward normalization, which will destabilize early fine-tuning.")
-        model = PPO.load(args.resume, env=vec_env, tensorboard_log=LOG_DIR)
+        model = PPO.load(args.resume, env=vec_env, tensorboard_log=log_dir)
         if args.learning_rate is not None:
             model.learning_rate = args.learning_rate
             model.lr_schedule = get_schedule_fn(args.learning_rate)
@@ -242,7 +277,7 @@ def main():
             # this, capping how far a single update can drag the policy.
             target_kl=0.03,
             policy_kwargs=dict(net_arch=[512, 256, 128]),
-            tensorboard_log=LOG_DIR,
+            tensorboard_log=log_dir,
             verbose=1,
         )
 
@@ -252,15 +287,15 @@ def main():
         reset_num_timesteps=not bool(args.resume),
     )
 
-    model.save(os.path.join(LOG_DIR, "go2_mujoco_final"))
-    vec_env.save(os.path.join(LOG_DIR, "vecnorm_final.pkl"))
+    model.save(os.path.join(log_dir, "go2_mujoco_final"))
+    vec_env.save(os.path.join(log_dir, "vecnorm_final.pkl"))
 
     final_curriculum = float(np.mean(vec_env.get_attr("curriculum_level")))
-    with open(CURRICULUM_PATH, "w") as f:
+    with open(curriculum_path, "w") as f:
         f.write(str(final_curriculum))
-    print(f"Final curriculum_level={final_curriculum:.3f} saved to {CURRICULUM_PATH}")
+    print(f"Final curriculum_level={final_curriculum:.3f} saved to {curriculum_path}")
 
-    print("Training done. Model saved to", LOG_DIR)
+    print("Training done. Model saved to", log_dir)
     vec_env.close()
     eval_env.close()
 

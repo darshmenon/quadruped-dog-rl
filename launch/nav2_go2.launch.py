@@ -21,7 +21,12 @@ def generate_launch_description():
     nav2_bringup = get_package_share_directory("nav2_bringup")
 
     default_map = os.path.join(champ_config, "maps", "map.yaml")
-    default_params = os.path.join(champ_config, "config", "autonomy", "navigation.yaml")
+    # champ_config's own navigation.yaml hardcodes robot_base_frame: base_link
+    # and amcl's base_frame_id: base_footprint -- neither link exists on the
+    # Go2 (champ_go2_gazebo.launch.py sets base_link_frame:="base"), so those
+    # costmap/AMCL TF lookups would fail against this robot. This copy just
+    # swaps those two frame names to "base"; see config/go2_navigation.yaml.
+    default_params = os.path.join(REPO, "config", "go2_navigation.yaml")
 
     return LaunchDescription([
         DeclareLaunchArgument("map", default_value=default_map),

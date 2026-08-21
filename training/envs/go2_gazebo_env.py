@@ -133,7 +133,8 @@ class _Go2RosNode(Node):
 class Go2GazeboEnv(gym.Env):
     """Gymnasium env that wraps a running Gazebo simulation via ROS2."""
 
-    def __init__(self, cmd=(0.5, 0.0, 0.0), auto_launch=True):
+    def __init__(self, cmd=(0.5, 0.0, 0.0), auto_launch=True,
+                 ros_domain_id="177", gz_partition="go2rltrain"):
         super().__init__()
         if not HAS_ROS:
             raise RuntimeError("rclpy not available. Source ROS2 setup.bash first.")
@@ -141,8 +142,17 @@ class Go2GazeboEnv(gym.Env):
         self.cmd = np.array(cmd, dtype=np.float32)
         self._proc = None
 
+        # Isolate from other concurrent ROS2/Gazebo sessions on this machine
+        # (e.g. launch/slam3d_go2.launch.py on domain 157) -- both the
+        # subprocess-launched sim below and this process's own rclpy node
+        # need to agree on the same domain/partition to see each other's
+        # topics/services.
+        import os
+        os.environ["ROS_DOMAIN_ID"] = str(ros_domain_id)
+        os.environ["GZ_PARTITION"] = str(gz_partition)
+
         if auto_launch:
-            self._launch_gazebo()
+            self._launch_gazebo(ros_domain_id, gz_partition)
 
         if not rclpy.ok():
             rclpy.init()
@@ -169,7 +179,7 @@ class Go2GazeboEnv(gym.Env):
         self._step_count = 0
         self._max_steps = int(EPISODE_LEN_S / CTRL_DT)
 
-    def _launch_gazebo(self):
+    def _launch_gazebo(self, ros_domain_id, gz_partition):
         import os
         pkg_dir = os.path.join(os.path.dirname(__file__), "..", "..")
         launch_file = os.path.join(pkg_dir, "training", "launch", "gazebo_rl.launch.py")
@@ -177,7 +187,8 @@ class Go2GazeboEnv(gym.Env):
             "bash", "-c",
             f"source /opt/ros/humble/setup.bash && "
             f"source {pkg_dir}/ros2/install/setup.bash && "
-            f"ros2 launch {launch_file} headless:=true"
+            f"ros2 launch {launch_file} headless:=true "
+            f"ros_domain_id:={ros_domain_id} gz_partition:={gz_partition}"
         ]
         self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(5.0)  # wait for Gazebo to come up

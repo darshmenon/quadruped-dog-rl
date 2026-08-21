@@ -12,6 +12,27 @@ runs/
 logs/
 *.pt
 *.pth
+*.partial
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.webm
+*.avi
+bags/
+maps/generated/
+training/logs/
+training/runs/
+training/checkpoints/
+training/eval/
+training/pretrained/go2_locomotion/
+training/pretrained/go2_parkour/
+docs/images/generated/
+
+# Generated terrain (regenerate with scripts/generate_stairs_ledges.py or
+# training/terrain/unitree_terrain_generator.py)
+training/terrain/generated/
+training/envs/go2_unitree_terrain_generated.xml
 
 # ROS2 build artifacts
 install/

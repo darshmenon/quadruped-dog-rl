@@ -52,6 +52,7 @@ from launch_ros.actions import Node
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_WORLD = REPO / "training" / "envs" / "go2_gz_world_outdoor.sdf"
 FRONTIER_EXPLORER = REPO / "scripts" / "frontier_explorer_go2.py"
+OBSTACLE_TRACKER = REPO / "scripts" / "obstacle_tracker_go2.py"
 GROUND_TRUTH_TO_ODOM = REPO / "scripts" / "quadsdk_ground_truth_to_odom.py"
 
 RTABMAP_COMMON_PARAMS = {
@@ -78,7 +79,7 @@ RTABMAP_COMMON_PARAMS = {
 }
 
 
-def _champ_actions(headless, world, explore):
+def _champ_actions(headless, world, explore, track_obstacles):
     champ_gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(REPO / "launch" / "champ_go2_gazebo.launch.py")),
         # Do NOT pass rviz:=false here. This GroupAction is scoped=False (see
@@ -108,6 +109,9 @@ def _champ_actions(headless, world, explore):
     # Started after CHAMP/the joint-trajectory adapter are up (t=13s in
     # champ_go2_gazebo.launch.py) and ground-truth odom has been publishing
     # for a few seconds (t=9s), so RTAB-Map's TF lookups don't race startup.
+    # database_path under /tmp: ~/.ros/rtabmap.db is often root-owned or
+    # unwritable when launches are started from mixed-privilege sessions,
+    # which makes rtabmap FATAL on open and leaves map->base unpublished.
     rtabmap_slam = TimerAction(
         period=16.0,
         actions=[Node(
@@ -120,6 +124,7 @@ def _champ_actions(headless, world, explore):
                 "frame_id": "base",
                 "odom_frame_id": "odom",
                 "map_frame_id": "map",
+                "database_path": "/tmp/go2_rtabmap/rtabmap_champ.db",
             }],
             remappings=[("odom", "/odom"), ("scan_cloud", "/points")],
             arguments=["-d"],  # fresh database each run
@@ -136,10 +141,22 @@ def _champ_actions(headless, world, explore):
         )],
     )
 
-    return [champ_gazebo, points_bridge, rtabmap_slam, frontier_explorer]
+    # Started after rtabmap_slam (t=16s) so map->base TF is already
+    # available, same reasoning as frontier_explorer's own 20s delay.
+    obstacle_tracker = TimerAction(
+        period=18.0,
+        condition=IfCondition(track_obstacles),
+        actions=[ExecuteProcess(
+            cmd=["python3", str(OBSTACLE_TRACKER), "--ros-args",
+                 "-p", "use_sim_time:=true"],
+            output="screen",
+        )],
+    )
+
+    return [champ_gazebo, points_bridge, rtabmap_slam, frontier_explorer, obstacle_tracker]
 
 
-def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore):
+def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore, track_obstacles):
     quad_gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             str(REPO / "ros2" / "quad_sdk" / "quad_utils" / "launch" / "quad_gazebo.py")),
@@ -233,6 +250,7 @@ def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore):
                 "frame_id": "body",
                 "odom_frame_id": "odom",
                 "map_frame_id": "map",
+                "database_path": "/tmp/go2_rtabmap/rtabmap_nmpc.db",
             }],
             remappings=[("odom", "/robot_1/odom"), ("scan_cloud", "/robot_1/points")],
             arguments=["-d"],
@@ -252,8 +270,22 @@ def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore):
         )],
     )
 
+    # Started after rtabmap_slam (t=22s) so map->body TF is already
+    # available, same reasoning as frontier_explorer's own 26s delay.
+    obstacle_tracker = TimerAction(
+        period=24.0,
+        condition=IfCondition(track_obstacles),
+        actions=[ExecuteProcess(
+            cmd=["python3", str(OBSTACLE_TRACKER), "--ros-args",
+                 "-p", "use_sim_time:=true",
+                 "-p", "points_topic:=/robot_1/points",
+                 "-p", "base_frame:=body"],
+            output="screen",
+        )],
+    )
+
     return [quad_gazebo, stand, nmpc_plan, points_bridge, lidar_static_tf,
-            ground_truth_to_odom, rtabmap_slam, frontier_explorer]
+            ground_truth_to_odom, rtabmap_slam, frontier_explorer, obstacle_tracker]
 
 
 def generate_launch_description():
@@ -262,6 +294,7 @@ def generate_launch_description():
     world = LaunchConfiguration("world")
     nmpc_world = LaunchConfiguration("nmpc_world")
     explore = LaunchConfiguration("explore")
+    track_obstacles = LaunchConfiguration("track_obstacles")
     ros_domain_id = LaunchConfiguration("ros_domain_id")
     gz_partition = LaunchConfiguration("gz_partition")
 
@@ -279,12 +312,12 @@ def generate_launch_description():
         # of context before the timer fires, so the deferred lookup throws
         # "launch configuration 'state_estimation' does not exist".
         scoped=False,
-        actions=_champ_actions(headless, world, explore),
+        actions=_champ_actions(headless, world, explore, track_obstacles),
     )
 
     nmpc_branch = GroupAction(
         condition=LaunchConfigurationEquals("locomotion", "nmpc"),
-        actions=_nmpc_actions(nmpc_gui_flag, nmpc_world, explore),
+        actions=_nmpc_actions(nmpc_gui_flag, nmpc_world, explore, track_obstacles),
     )
 
     rviz2 = Node(
@@ -314,17 +347,24 @@ def generate_launch_description():
                                            "~5m -- too small to explore)."),
         DeclareLaunchArgument("explore", default_value="false",
                                description="Auto-start scripts/frontier_explorer_go2.py"),
+        DeclareLaunchArgument("track_obstacles", default_value="false",
+                               description="Auto-start scripts/obstacle_tracker_go2.py"),
         DeclareLaunchArgument(
             "ros_domain_id", default_value="157",
             description="ROS_DOMAIN_ID for this launch tree, isolated from other concurrent "
                         "ROS2 workspaces on this machine (quad_sdk's real-robot scripts hardcode "
-                        "42; unset/default is 0). Override if you want to share a domain."),
+                        "42; unset/default is 0). Must be 0..232 — FastDDS's default port math "
+                        "rejects higher IDs with 'Calculated port number is too high'."),
         DeclareLaunchArgument(
             "gz_partition", default_value="quad3dslam",
             description="GZ_PARTITION for this launch tree's Gazebo transport, isolated from "
                         "any other gz sim instance running concurrently."),
         SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id),
         SetEnvironmentVariable("GZ_PARTITION", gz_partition),
+        # rtabmap's database_path parents below must exist before the node
+        # opens them -- ~/.ros is often root-owned after mixed-privilege
+        # sessions, so we keep the DBs under /tmp/go2_rtabmap instead.
+        ExecuteProcess(cmd=["mkdir", "-p", "/tmp/go2_rtabmap"], output="screen"),
         champ_branch,
         nmpc_branch,
         rviz2,

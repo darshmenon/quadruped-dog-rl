@@ -234,7 +234,11 @@ class ChampToGo2Gazebo(Node):
                 capture_output=True,
                 timeout=1.0,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, PermissionError, OSError):
+            # TimeoutExpired can itself raise PermissionError when the
+            # runtime can't SIGKILL the hung `gz topic` child (sandbox /
+            # restricted environments) -- treat that the same as a miss so
+            # this adapter keeps publishing joint targets.
             return None
         if result.returncode != 0:
             return None

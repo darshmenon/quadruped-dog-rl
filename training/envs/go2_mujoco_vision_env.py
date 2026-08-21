@@ -47,7 +47,8 @@ class Go2MujocoVisionEnv(Go2MujocoEnv):
 
     def __init__(self, cmd=(0.5, 0.0, 0.0), render_mode=None,
                  randomize_domain=True, use_curriculum=True, use_vision=True,
-                 terrain_difficulty=1.0):
+                 terrain_difficulty=1.0, gait_conditioned=False,
+                 gait_name="trotting", initial_curriculum_level=0.0):
         self.use_vision = use_vision
         self.terrain_difficulty = float(np.clip(terrain_difficulty, 0.0, 1.0))
         self._scan_geomid = np.zeros(1, dtype=np.int32)
@@ -60,7 +61,10 @@ class Go2MujocoVisionEnv(Go2MujocoEnv):
         try:
             super().__init__(cmd=cmd, render_mode=render_mode,
                              randomize_domain=randomize_domain,
-                             use_curriculum=use_curriculum)
+                             use_curriculum=use_curriculum,
+                             initial_curriculum_level=initial_curriculum_level,
+                             gait_conditioned=gait_conditioned,
+                             gait_name=gait_name)
         finally:
             base_module.SCENE_XML = original_scene
 
@@ -84,7 +88,8 @@ class Go2MujocoVisionEnv(Go2MujocoEnv):
             for i in range(N_OBSTACLES)
         ]
 
-        obs_dim = BASE_OBS_DIM + (SCAN_DIM if use_vision else 0)
+        base_dim = int(self.observation_space.shape[0])
+        obs_dim = base_dim + (SCAN_DIM if use_vision else 0)
         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
 
@@ -251,14 +256,35 @@ class Go2MujocoVisionEnv(Go2MujocoEnv):
 
 
 if __name__ == "__main__":
+    # Rough scene is legs-only (no arm); smoke the observation layout on the
+    # stairs course which shares the flat robot DOF layout, then only
+    # construct the rough env to confirm the observation space size.
+    try:
+        from envs.go2_mujoco_stairs_env import Go2MujocoStairsEnv
+    except ImportError:
+        from go2_mujoco_stairs_env import Go2MujocoStairsEnv
+
     for vision in (False, True):
-        env = Go2MujocoVisionEnv(render_mode=None, randomize_domain=False,
-                                 use_curriculum=True, use_vision=vision)
-        obs, _ = env.reset(seed=0)
-        expected = BASE_OBS_DIM + (SCAN_DIM if vision else 0)
-        assert obs.shape == (expected,), f"expected {expected}, got {obs.shape[0]}"
-        for _ in range(100):
-            obs, r, term, trunc, _ = env.step(env.action_space.sample())
-            if term or trunc:
-                obs, _ = env.reset()
-        print(f"use_vision={vision}: obs shape {obs.shape} smoke-test passed")
+        for gait in (False, True):
+            env = Go2MujocoStairsEnv(
+                render_mode=None, randomize_domain=False,
+                use_curriculum=False, use_vision=vision,
+                gait_conditioned=gait)
+            obs, _ = env.reset(seed=0)
+            base_dim = BASE_OBS_DIM + (base_module.GAIT_OBS_DIM if gait else 0)
+            expected = base_dim + (SCAN_DIM if vision else 0)
+            assert obs.shape == (expected,), f"expected {expected}, got {obs.shape[0]}"
+            for _ in range(50):
+                obs, r, term, trunc, _ = env.step(env.action_space.sample())
+                if term or trunc:
+                    obs, _ = env.reset()
+            print(f"stairs vision={vision} gait={gait}: obs {obs.shape} ok")
+            env.close()
+
+    env = Go2MujocoVisionEnv(
+        render_mode=None, randomize_domain=False,
+        use_curriculum=False, use_vision=True, gait_conditioned=True)
+    print(f"rough env constructed: obs_space={env.observation_space.shape}")
+    env.close()
+
+

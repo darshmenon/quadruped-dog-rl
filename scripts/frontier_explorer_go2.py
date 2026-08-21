@@ -21,6 +21,17 @@ Good enough to grow the RTAB-Map map autonomously; not a substitute for a
 real planner if obstacles crowd the direct line to a goal (cmd_vel mode
 only -- NMPC mode gets real obstacle-aware planning from Quad-SDK itself).
 
+Ported a few safety habits from rosnav's builtin frontier_explorer.py
+(goal_pullback/frontier_clearance_radius, explore_lite's progress_timeout):
+frontier goals get pulled back off the free/unknown boundary into confirmed
+clear space, and a goal that stops making progress for too long (usually
+because it's wedged against an obstacle the wavefront saw as reachable but
+the point-and-go controller can't actually thread) gets abandoned and
+temporarily excluded so the next search doesn't just re-pick it. It also
+optionally listens to scripts/obstacle_tracker_go2.py's /obstacle_tracker/state
+topic to keep frontier goals and the lookahead check away from moving
+obstacles -- rosnav has no equivalent since it has no dynamic-obstacle tracker.
+
 Usage:
     python3 scripts/frontier_explorer_go2.py --ros-args -p use_sim_time:=true
     python3 scripts/frontier_explorer_go2.py --ros-args -p use_sim_time:=true \\
@@ -28,13 +39,17 @@ Usage:
         -p goal_state_topic:=/robot_1/goal_state
 """
 
+import json
 import math
 
 import numpy as np
 import rclpy
+from frontier_geometry import find_frontier_goal, raycast_blocked, world_to_cell
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import OccupancyGrid
+from rclpy.duration import Duration
 from rclpy.node import Node
+from std_msgs.msg import String
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -46,6 +61,7 @@ MIN_FRONTIER_SIZE = 6    # ignore frontier clusters smaller than this many cells
 GOAL_TOLERANCE = 0.45    # m, close enough to a frontier goal to replan
 BLOCKED_LOOKAHEAD = 0.5  # m, don't drive forward if this close a cell is occupied
 NO_FRONTIER_TIMEOUT = 30.0  # s with no frontier found before declaring done
+OBSTACLE_STALE_TIMEOUT = 2.0  # s, ignore /obstacle_tracker/state once this stale
 
 
 class FrontierExplorer(Node):
@@ -58,12 +74,38 @@ class FrontierExplorer(Node):
         self.declare_parameter('control_period', 0.1)
         self.declare_parameter('control_mode', 'cmd_vel')  # 'cmd_vel' or 'nmpc_goal'
         self.declare_parameter('goal_state_topic', '/robot_1/goal_state')
+        # Standoff pulled a chosen frontier goal back toward the robot, off
+        # the free/unknown boundary the wavefront search necessarily leaves
+        # it on (rosnav's goal_pullback/frontier_clearance_radius default to
+        # 0.55m; kept a bit tighter here since the Go2's own footprint is
+        # smaller than the diff-drive base rosnav was tuned against).
+        self.declare_parameter('clearance_standoff', 0.3)
+        # If a goal stops getting closer for this long, treat it as stuck
+        # (wedged against something the wavefront saw as reachable but the
+        # point-and-go controller can't actually thread) rather than idling
+        # on it forever -- same intent as explore_lite's progress_timeout.
+        self.declare_parameter('stuck_timeout', 12.0)
+        self.declare_parameter('min_goal_progress', 0.15)
+        self.declare_parameter('goal_exclude_radius', 0.6)
+        self.declare_parameter('goal_exclude_ttl', 15.0)
+        # Empty topic name disables obstacle-awareness entirely (no
+        # obstacle_tracker_go2.py running, e.g. track_obstacles:=false).
+        self.declare_parameter('obstacle_state_topic', '/obstacle_tracker/state')
+        self.declare_parameter('obstacle_avoid_radius', 0.6)
+        self.declare_parameter('obstacle_speed_min', 0.05)
 
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.linear_speed = self.get_parameter('linear_speed').value
         self.angular_speed = self.get_parameter('angular_speed').value
         self.control_mode = self.get_parameter('control_mode').value
+        self.clearance_standoff = self.get_parameter('clearance_standoff').value
+        self.stuck_timeout = self.get_parameter('stuck_timeout').value
+        self.min_goal_progress = self.get_parameter('min_goal_progress').value
+        self.goal_exclude_radius = self.get_parameter('goal_exclude_radius').value
+        self.goal_exclude_ttl = self.get_parameter('goal_exclude_ttl').value
+        self.obstacle_avoid_radius = self.get_parameter('obstacle_avoid_radius').value
+        self.obstacle_speed_min = self.get_parameter('obstacle_speed_min').value
         self.published_goal_xy = None  # last goal actually sent in nmpc_goal mode
 
         self.tf_buffer = Buffer()
@@ -76,8 +118,17 @@ class FrontierExplorer(Node):
             self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 1)
 
+        self.obstacle_tracks = []
+        self.obstacle_tracks_stamp = None
+        obstacle_topic = self.get_parameter('obstacle_state_topic').value
+        if obstacle_topic:
+            self.create_subscription(String, obstacle_topic, self._on_obstacle_state, 5)
+
         self.latest_map = None
         self.goal_xy = None
+        self.goal_progress_best = None
+        self.goal_progress_time = self.get_clock().now()
+        self.excluded_goals = []  # [(x, y, expire_time), ...]
         self.last_frontier_seen = self.get_clock().now()
 
         # champ_joint_trajectory_to_go2_gz.py (cmd_vel mode only) treats
@@ -93,10 +144,34 @@ class FrontierExplorer(Node):
         self.create_timer(period, self._step)
         self.get_logger().info(
             f'frontier_explorer_go2 started (control_mode={self.control_mode}, '
-            f'map_frame={self.map_frame}, base_frame={self.base_frame})')
+            f'map_frame={self.map_frame}, base_frame={self.base_frame}, '
+            f'obstacle_topic={obstacle_topic or "disabled"})')
 
     def _on_map(self, msg: OccupancyGrid):
         self.latest_map = msg
+
+    def _on_obstacle_state(self, msg: String):
+        try:
+            tracks = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(tracks, list):
+            self.obstacle_tracks = tracks
+            self.obstacle_tracks_stamp = self.get_clock().now()
+
+    def _active_obstacle_tracks(self):
+        """Moving tracks from obstacle_tracker_go2.py, or [] if none/stale."""
+        if self.obstacle_tracks_stamp is None:
+            return []
+        age = (self.get_clock().now() - self.obstacle_tracks_stamp).nanoseconds / 1e9
+        if age > OBSTACLE_STALE_TIMEOUT:
+            return []
+        return [t for t in self.obstacle_tracks
+                if t.get('speed', 0.0) >= self.obstacle_speed_min]
+
+    def _prune_excluded_goals(self):
+        now = self.get_clock().now()
+        self.excluded_goals = [g for g in self.excluded_goals if g[2] > now]
 
     def _robot_pose(self):
         try:
@@ -118,106 +193,29 @@ class FrontierExplorer(Node):
         ox, oy = msg.info.origin.position.x, msg.info.origin.position.y
         grid = np.array(msg.data, dtype=np.int16).reshape((h, w))
 
-        rc = int((robot_x - ox) / res)
-        rr = int((robot_y - oy) / res)
+        rr, rc = world_to_cell(robot_x, robot_y, ox, oy, res)
         if not (0 <= rr < h and 0 <= rc < w):
             self.get_logger().warn('robot cell is outside the current map bounds')
             return None
 
-        # Wavefront BFS over free cells reachable from the robot's cell.
-        # Unknown cells (-1) must NOT count as free -- excluding them here
-        # is what makes a cell adjacent to unknown space a frontier at all;
-        # otherwise the BFS floods straight through unmapped territory
-        # (-1 < FREE_MAX is true) and never sees a boundary to stop at.
-        known = grid >= 0
-        free = known & (grid < FREE_MAX)
-        reachable = np.zeros_like(free)
-        if not free[rr, rc]:
-            # Snap to the nearest free cell within a small radius so we can
-            # still start the search right after spawn / a tight replan.
-            found = False
-            for radius in range(1, 6):
-                for dr in range(-radius, radius + 1):
-                    for dc in range(-radius, radius + 1):
-                        r2, c2 = rr + dr, rc + dc
-                        if 0 <= r2 < h and 0 <= c2 < w and free[r2, c2]:
-                            rr, rc, found = r2, c2, True
-                            break
-                    if found:
-                        break
-                if found:
-                    break
-            if not found:
-                return None
-
-        stack = [(rr, rc)]
-        reachable[rr, rc] = True
-        frontier_cells = []
-        while stack:
-            r, c = stack.pop()
-            is_frontier = False
-            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nr, nc = r + dr, c + dc
-                if not (0 <= nr < h and 0 <= nc < w):
-                    continue
-                val = grid[nr, nc]
-                if val < 0:  # unknown
-                    is_frontier = True
-                    continue
-                if free[nr, nc] and not reachable[nr, nc] and val < OCCUPIED_MIN:
-                    reachable[nr, nc] = True
-                    stack.append((nr, nc))
-            if is_frontier:
-                frontier_cells.append((r, c))
-
-        if not frontier_cells:
-            return None
-
-        # Cluster frontier cells (4-connected) and score each cluster by
-        # size / (1 + distance from robot), same tradeoff explore_lite uses
-        # (bigger unknown regions win, but nearer ones are cheaper to reach).
-        frontier_set = set(frontier_cells)
-        visited = set()
-        best_score, best_centroid = -1.0, None
-        for cell in frontier_cells:
-            if cell in visited:
-                continue
-            cluster = []
-            queue = [cell]
-            visited.add(cell)
-            while queue:
-                r, c = queue.pop()
-                cluster.append((r, c))
-                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    nb = (r + dr, c + dc)
-                    if nb in frontier_set and nb not in visited:
-                        visited.add(nb)
-                        queue.append(nb)
-            if len(cluster) < MIN_FRONTIER_SIZE:
-                continue
-            cr = sum(p[0] for p in cluster) / len(cluster)
-            cc = sum(p[1] for p in cluster) / len(cluster)
-            gx = ox + (cc + 0.5) * res
-            gy = oy + (cr + 0.5) * res
-            dist = math.hypot(gx - robot_x, gy - robot_y)
-            score = len(cluster) / (1.0 + dist)
-            if score > best_score:
-                best_score, best_centroid = score, (gx, gy)
-
-        return best_centroid
+        self._prune_excluded_goals()
+        excluded = [(gx, gy) for gx, gy, _ in self.excluded_goals]
+        tracks = self._active_obstacle_tracks()
+        return find_frontier_goal(
+            grid, w, h, res, ox, oy, robot_x, robot_y, excluded, tracks,
+            free_max=FREE_MAX, occupied_min=OCCUPIED_MIN, min_frontier_size=MIN_FRONTIER_SIZE,
+            clearance_standoff=self.clearance_standoff, goal_exclude_radius=self.goal_exclude_radius,
+            obstacle_avoid_radius=self.obstacle_avoid_radius)
 
     def _path_blocked(self, msg: OccupancyGrid, robot_x, robot_y, yaw):
         res = msg.info.resolution
         ox, oy = msg.info.origin.position.x, msg.info.origin.position.y
         w, h = msg.info.width, msg.info.height
         grid = np.array(msg.data, dtype=np.int16).reshape((h, w))
-        lx = robot_x + BLOCKED_LOOKAHEAD * math.cos(yaw)
-        ly = robot_y + BLOCKED_LOOKAHEAD * math.sin(yaw)
-        c = int((lx - ox) / res)
-        r = int((ly - oy) / res)
-        if not (0 <= r < h and 0 <= c < w):
-            return False
-        return grid[r, c] >= OCCUPIED_MIN
+        tracks = self._active_obstacle_tracks()
+        return raycast_blocked(grid, w, h, res, ox, oy, robot_x, robot_y, yaw,
+                                BLOCKED_LOOKAHEAD, tracks, obstacle_margin=0.15,
+                                occupied_min=OCCUPIED_MIN)
 
     def _step(self):
         msg = self.latest_map
@@ -227,17 +225,33 @@ class FrontierExplorer(Node):
         if pose is None:
             return
         rx, ry, yaw = pose
+        now = self.get_clock().now()
 
         if self.goal_xy is not None:
             dist_to_goal = math.hypot(self.goal_xy[0] - rx, self.goal_xy[1] - ry)
             if dist_to_goal < GOAL_TOLERANCE:
                 self.goal_xy = None
+            elif (self.goal_progress_best is None
+                  or dist_to_goal < self.goal_progress_best - self.min_goal_progress):
+                self.goal_progress_best = dist_to_goal
+                self.goal_progress_time = now
+            elif (now - self.goal_progress_time).nanoseconds / 1e9 > self.stuck_timeout:
+                self.get_logger().warn(
+                    f'no progress toward ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f}) for '
+                    f'{self.stuck_timeout:.0f}s -- abandoning it')
+                self.excluded_goals.append((
+                    self.goal_xy[0], self.goal_xy[1],
+                    now + Duration(seconds=self.goal_exclude_ttl)))
+                self.goal_xy = None
 
         if self.goal_xy is None:
             self.goal_xy = self._find_frontier_goal(msg, rx, ry)
+            if self.goal_xy is not None:
+                self.goal_progress_best = None
+                self.goal_progress_time = now
 
         if self.goal_xy is None:
-            elapsed = (self.get_clock().now() - self.last_frontier_seen).nanoseconds / 1e9
+            elapsed = (now - self.last_frontier_seen).nanoseconds / 1e9
             if elapsed > NO_FRONTIER_TIMEOUT:
                 self.get_logger().info(
                     f'no frontiers left for {elapsed:.0f}s -- exploration complete, stopping.',
@@ -246,7 +260,7 @@ class FrontierExplorer(Node):
                 self.cmd_pub.publish(Twist())
             return
 
-        self.last_frontier_seen = self.get_clock().now()
+        self.last_frontier_seen = now
 
         if self.control_mode == 'nmpc_goal':
             # Quad-SDK's global_body_planner already tracks whatever goal it

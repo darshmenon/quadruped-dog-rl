@@ -9,16 +9,24 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 
 **What's working right now:**
 - **RL locomotion (primary focus)**: a PPO policy trained end-to-end in MuJoCo — no hand-written gait, no IK, just observations in and joint targets out — learns to walk the Go2 from scratch (domain randomization, curriculum, 8-term reward). A second pipeline trains and compares **blind vs. sighted** policies on procedurally randomized rough, multi-terrain ground with scattered obstacles and an 18-point height-scan observation. See [RL Policy Training](#rl-policy-training).
+- **Stairs & ledges**: Gazebo + MuJoCo courses (solid stair curriculum, platforms, gaps, hollow open-riser stairs) with one-command CHAMP walk. See [Stairs & ledge worlds](#stairs--ledge-worlds).
+- **Go2 model weights**: local Stable-Baselines3 `.zip` walk checkpoints can be resumed and improved in this repo; downloadable Isaac/rsl_rl/Genesis `.pt` files use their upstream stacks. See [Go2 model files](docs/PRETRAINED.md).
+- **Research library**: 14 local PDFs on stair climbing, parkour, recovery, and adaptation under [docs/papers/](docs/papers/README.md).
 - **[Quad-SDK](https://github.com/robomechanics/quad-sdk) NMPC** drives a real Unitree Go2 to a commanded goal in Gazebo Harmonic — stands up, plans a path, solves NMPC in real time (~20-30ms/solve), and walks at ~0.7 m/s. See [Quad-SDK (NMPC locomotion)](#quad-sdk-nmpc-locomotion--go2-walks) for the full verified trace.
 - **CHAMP** kinematic gait engine for quick, dependency-light walking on the generic reference robot.
+- **Indoor autonomy**: room world + RTAB-Map 3D SLAM, frontier exploration, obstacle tracking — [docs/DEMOS.md](docs/DEMOS.md).
 
 **Go2 is the only fully working robot** — real URDF, meshes, and both locomotion backends. The `urdf/{go1,spot,mini_cheetah,mini_pupper,anymal_b,anymal_c}_config/` folders are CHAMP gait/joint-layout config stubs carried over from upstream CHAMP examples: no URDF or mesh files are vendored, each references an external `*_description` ROS1(!) package by `$(find ...)` that isn't included in this repo, so none of them spawn as-is. Treat them as a starting point for wiring up a new robot, not as ready-to-run.
+
+![Go2 walking under Quad-SDK NMPC control](docs/images/go2_walking.gif)
 
 ![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
 
 ![Go2 2D SLAM map of a room in RViz](docs/images/go2_slam_2d_room.png)
 
-![Go2 walking under Quad-SDK NMPC control](docs/images/go2_walking.gif)
+![Go2 RL policy in MuJoCo viewer](docs/images/go2_policy.png)
+
+![Go2 with manipulator arm](docs/images/go2_manipulator_arm.png)
 
 ---
 
@@ -30,6 +38,8 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 - [CHAMP Locomotion Simulation](#champ-locomotion-simulation)
 - [Locomotion Backends](#locomotion-backends)
 - [RL Policy Training](#rl-policy-training)
+- [Stairs & ledge worlds](#stairs--ledge-worlds)
+- [Model policies](#model-policies)
 - [Headless IK Controller](#headless-ik-controller-no-rl)
 - [Play Trained Policy](#play-trained-policy-opencv-viewer)
 - [Keyboard Teleop](#keyboard-teleop-mujoco-with-rl-policy)
@@ -38,6 +48,7 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 - [Manipulator Arm](#manipulator-arm)
 - [Intelligence Modules](#intelligence-modules)
 - [Roadmap](#roadmap)
+- [Additional Docs](#additional-docs)
 - [References](#references)
 
 ---
@@ -47,62 +58,45 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 ```
 quadruped-robotics-stack/
 ├── urdf/                    # Robot URDF and mesh files
-│   ├── go1_config/          # Unitree Go1
-│   ├── go2_unitree/         # Unitree Go2 (with DAE meshes)
-│   ├── spot_config/         # Boston Dynamics Spot
-│   ├── mini_cheetah_config/ # MIT Mini Cheetah
-│   ├── mini_pupper_config/  # Mini Pupper
-│   ├── anymal_b_config/     # ANYmal B (ETH Zurich)
-│   └── anymal_c_config/     # ANYmal C (ETH Zurich)
-├── ros2/                    # ROS2 packages (CHAMP framework, ros2 branch)
-│   ├── champ/               # Core locomotion controller
-│   ├── champ_base/          # Hardware abstraction layer
-│   ├── champ_bringup/       # Launch files
-│   ├── champ_config/        # Robot-specific configs
-│   ├── champ_description/   # URDF loading
-│   ├── champ_gazebo/        # Gazebo simulation
-│   ├── champ_navigation/    # Navigation stack
-│   ├── champ_teleop/        # Keyboard/joystick teleoperation
-│   ├── robots/              # Pre-configured robot packages
-│   ├── quad_sdk/            # Quad-SDK (CMU) NMPC locomotion backend, Go2-focused
-│   └── quad_sdk_external/   # RBDL + IPOPT sources/local build for quad_sdk
+│   └── go2_unitree/         # Unitree Go2 (with DAE meshes) — fully working
+├── ros2/                    # CHAMP + Quad-SDK ROS2 packages
 ├── launch/                  # Top-level launch files
-│   ├── view_go2.launch.py   # View Go2 URDF in RViz2
-│   ├── gazebo_go2.launch.py # Spawn Go2 in Gazebo Harmonic
-│   ├── gazebo_sim.launch.py # Generic Gazebo sim launcher (CHAMP)
-│   ├── rviz_view.launch.py  # Generic RViz2 viewer
-│   ├── policy_deploy.launch.py # Deploy trained RL policy (MuJoCo)
-│   └── slam_go2.launch.py   # SLAM mapping with 2D LiDAR
-├── scripts/                 # Shell scripts for common tasks
-│   ├── train_policy.sh      # Train walking policy
-│   ├── play_policy.sh       # Visualize trained policy
-│   ├── launch_sim.sh        # Launch CHAMP Gazebo sim
-│   ├── spawn_go2_gazebo.sh  # Direct Gazebo spawning
-│   ├── make_go2_stand.py    # Convert URDF → standing SDF
-│   └── gz_pose_to_odom.py   # Ground truth odometry for mapping
-├── training/                # RL policy training
-│   ├── legged_gym/          # Isaac Gym PPO environments (original)
-│   ├── envs/                # MuJoCo + Gazebo Gymnasium environments
-│   │   ├── go2_mujoco_env.py         # Go2 MuJoCo env (SB3 PPO), flat ground
-│   │   ├── go2_mujoco_vision_env.py  # Rough multi-terrain + obstacles, blind/sighted switch
-│   │   ├── go2_gazebo_env.py         # Go2 Gazebo env (ROS2 bridge)
-│   │   ├── go2_scene.xml             # MuJoCo MJCF scene, flat plane
-│   │   └── go2_rough_scene.xml       # MuJoCo MJCF scene, randomized heightfield + obstacles
-│   ├── train_mujoco.py      # MuJoCo training script, flat ground
-│   ├── train_vision_compare.py # Trains + compares blind vs. sighted on rough terrain
-│   ├── train_gazebo.py      # Gazebo training script
-│   ├── teleop_mujoco.py     # Keyboard teleop in MuJoCo
-│   ├── launch/              # ROS2 launch files for Gazebo RL
-│   ├── deploy/              # Policy deployment (MuJoCo / real robot)
-│   └── setup.py
-├── intelligence/            # Higher-level autonomy stack
-│   ├── gait/                # Gait scheduler
-│   ├── perception/          # Terrain estimator
-│   ├── navigation/          # Waypoint navigator (ROS2)
-│   ├── terrain/             # Adaptive controller
-│   └── llm_commander/       # Natural language → robot commands
-├── description/             # Robot description docs and joint conventions
-└── interfaces/              # Custom ROS2 msgs, srvs, actions
+│   ├── champ_go2_gazebo.launch.py
+│   ├── stairs_ledges_go2.launch.py   # CHAMP on stairs or ledges course
+│   ├── indoor_autonomy_go2.launch.py # Room + RTAB-Map + frontier explore
+│   ├── slam3d_go2.launch.py
+│   ├── nav2_go2.launch.py
+│   └── …
+├── scripts/
+│   ├── generate_stairs_ledges.py     # Regenerate stair/ledge SDF + MJCF
+│   ├── download_pretrained.py        # Fetch Go2 locomotion/parkour .pt
+│   ├── train_stairs.sh               # MuJoCo stairs curriculum train
+│   ├── train_policy.sh
+│   └── …
+├── training/
+│   ├── envs/
+│   │   ├── go2_gz_world_stairs.sdf   # Easy→mid→hard stairs + descent
+│   │   ├── go2_gz_world_ledges.sdf   # Platforms, gaps, hollow stairs
+│   │   ├── go2_gz_world_room.sdf     # Indoor autonomy
+│   │   ├── go2_gz_world_outdoor.sdf
+│   │   ├── go2_stairs_scene.xml      # MuJoCo stairs+ledges course
+│   │   └── …
+│   ├── terrain/             # Generators + Unitree terrain_tool helpers
+│   ├── pretrained/          # Downloaded .pt weights (gitignored); see README
+│   │   ├── go2_locomotion/  # flat + rough Isaac PPO
+│   │   └── go2_parkour/     # RPL rough / field / visual distill
+│   ├── logs/mujoco/         # Local SB3 walk checkpoints (best_model.zip, …)
+│   └── …
+├── intelligence/            # Gait, perception, navigation, LLM commander
+├── docs/
+│   ├── images/              # Demo GIFs / SLAM / policy / arm screenshots
+│   ├── papers/              # 14 local PDFs (stairs, parkour, recovery)
+│   ├── DEMOS.md
+│   ├── PRETRAINED.md
+│   ├── BENCHMARKS.md
+│   ├── TROUBLESHOOTING.md
+│   └── PROJECT_GROWTH_PLAN.md
+└── …
 ```
 
 ---
@@ -196,6 +190,8 @@ Use arrow keys / WASD to drive.
 
 ### 3. Train and run an RL policy (Go2, MuJoCo)
 
+Use this path for policies produced by this repository. These checkpoints are Stable-Baselines3 `.zip` files and should be loaded with `training/play_policy.py` or resumed with `training/train_mujoco.py`.
+
 ```bash
 pip install -r requirements.txt
 
@@ -210,6 +206,46 @@ python3 training/play_policy.py --model training/logs/mujoco/go2_mujoco_final.zi
 ```
 
 See [RL Policy Training](#rl-policy-training) and [Play Trained Policy](#play-trained-policy-opencv-viewer) for details, reward terms, and the Gazebo backend.
+
+### 4. Stairs & ledges (CHAMP walk)
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2/install/setup.bash
+
+# Solid stairs: easy 6 cm → mid 8 cm → hard 12 cm + descent
+ros2 launch launch/stairs_ledges_go2.launch.py course:=stairs
+
+# Platforms, gap crossings, hollow (open-riser) stairs, curb
+ros2 launch launch/stairs_ledges_go2.launch.py course:=ledges
+```
+
+After ~15 s, drive with `/cmd_vel` or CHAMP teleop. Worlds: `training/envs/go2_gz_world_{stairs,ledges}.sdf` (world name `go2_rl`). Details: [Stairs & ledge worlds](#stairs--ledge-worlds).
+
+### 5. Indoor autonomy (room + 3D SLAM)
+
+```bash
+ros2 launch launch/indoor_autonomy_go2.launch.py
+```
+
+RTAB-Map, frontier exploration, obstacle tracking. Full checklist: [docs/DEMOS.md](docs/DEMOS.md).
+
+### 6. Model policies
+
+There are two different model formats in this project:
+
+- **SB3 `.zip` checkpoints** under `training/logs/` are the models this repo can play, resume, and fine-tune.
+- **`.pt` model files** under `training/pretrained/` run with the stack named in [docs/PRETRAINED.md](docs/PRETRAINED.md); they are not directly loadable by the SB3 scripts here.
+
+```bash
+# Local SB3 walk (this repo)
+python3 training/play_policy.py --model training/logs/mujoco/best_model.zip --cmd 0.5 0 0
+
+# Download Go2 .pt model files into training/pretrained/
+python3 scripts/download_pretrained.py
+```
+
+Full table and usage notes: [docs/PRETRAINED.md](docs/PRETRAINED.md). Research PDFs: [docs/papers/README.md](docs/papers/README.md).
 
 ---
 
@@ -380,7 +416,18 @@ pip install -r requirements.txt
 
 # Resume from checkpoint (VecNormalize stats auto-loaded from checkpoints/ dir)
 ./scripts/train_policy.sh mujoco --resume training/logs/mujoco/checkpoints/go2_mujoco_500000_steps.zip
+
+# Conservative fine-tune of an existing SB3 policy
+python3 training/train_mujoco.py \
+  --resume training/logs/mujoco/checkpoints/go2_mujoco_3400000_steps.zip \
+  --vecnorm training/logs/mujoco/checkpoints/vecnorm_3400000_steps.pkl \
+  --learning_rate 0.00005 \
+  --n_epochs 5 \
+  --timesteps 1000000 \
+  --n_envs 8
 ```
+
+Use a matching `vecnorm_<steps>_steps.pkl` when resuming a numbered checkpoint. Loading a good policy with stale normalization stats can make evaluation or fine-tuning look much worse than the checkpoint really is.
 
 Smoke-tested end to end (4k steps, 2 envs) — the pipeline trains cleanly and logs all
 8 reward terms. On some machines, building the PPO/Adam optimizer makes `torch`
@@ -485,6 +532,40 @@ reset pose is hardcoded to `(0,0,0.32)`, so the origin has to stay flat):
 | Rough patch | 14 – 18 m | 7x7 grid of small boxes with smoothly-varying height (0.02-0.07 m) |
 | Obstacles | 20 – 24 m | 10 scattered boxes, jittered position/size/yaw |
 
+#### Stairs & ledge worlds
+
+Dedicated stair / ledge / gap courses (regenerate with `python3 scripts/generate_stairs_ledges.py`).
+World name is `go2_rl` so existing CHAMP / stand / odom bridges work.
+
+```bash
+# One-command CHAMP walk (teleop /cmd_vel after ~15 s)
+ros2 launch launch/stairs_ledges_go2.launch.py course:=stairs
+ros2 launch launch/stairs_ledges_go2.launch.py course:=ledges
+
+# Sim-only (RL / stand)
+ros2 launch training/launch/gazebo_rl.launch.py \
+  world:="$(pwd)/training/envs/go2_gz_world_stairs.sdf"
+ros2 launch training/launch/gazebo_rl.launch.py \
+  world:="$(pwd)/training/envs/go2_gz_world_ledges.sdf"
+```
+
+| Course | File | Contents |
+|--------|------|----------|
+| stairs | `training/envs/go2_gz_world_stairs.sdf` | Easy 6 cm → mid 8 cm → hard 12 cm + descent |
+| ledges | `training/envs/go2_gz_world_ledges.sdf` | Platforms, gaps, hollow open-riser stairs, curb |
+
+MuJoCo equivalent: `training/envs/go2_stairs_scene.xml`. Train / play:
+
+```bash
+./scripts/train_stairs.sh                              # sighted height-scan
+./scripts/train_stairs.sh --blind                      # proprioception only
+python3 training/play_policy.py --model training/logs/stairs/best_model.zip --scene stairs
+```
+
+Notes and Unitree `AddStairs` / `AddSuspendStairs` helpers: [training/terrain/README.md](training/terrain/README.md).
+Research PDFs (StairMaster, blind stairs, parkour): [docs/papers/README.md](docs/papers/README.md).
+Go2 model weights: [docs/PRETRAINED.md](docs/PRETRAINED.md) · [Model policies](#model-policies).
+
 The rough patch is generated by `scripts/generate_rough_patch.py` (numpy
 box-blur, no external deps) rather than a Gazebo `<heightmap>` — a heightmap
 was tried first but crashes Ogre2's shader compiler under this environment's
@@ -506,6 +587,69 @@ source /opt/ros/humble/setup.bash
 source ros2/install/setup.bash
 ros2 launch launch/nav2_go2.launch.py
 ```
+
+## Model policies
+
+| Kind | Location | Use in this repo |
+|------|----------|------------------|
+| SB3 MuJoCo walk | `training/logs/mujoco/*.zip` + matching `vecnorm_*.pkl` | Play with `training/play_policy.py`; resume/fine-tune with `training/train_mujoco.py --resume ...` |
+| SB3 blind stairs | `training/logs/stairs/*.zip` after training | Fine-tune from flat walk with `./scripts/train_stairs.sh --blind --init-from-flat` |
+| `flat_model_6800`, `rough_model_7850` | `training/pretrained/go2_locomotion/*.pt` | Use with Go2_Isaac_ros2 |
+| `rpl_rough_go2_model_2000`, `rpl_field_go2_model_40000`, `rpl_visual_distill_go2_model_100000` | `training/pretrained/go2_parkour/*.pt` | Use with the parkour-drl stack |
+| `sim2real_walk`, `sim2real_stairs`, `sim2real_stairs_39cm_104000`, `cts_moe_policy` | `training/pretrained/go2_stairs/*.pt` | Use with the linked stairs stacks in `docs/PRETRAINED.md` |
+| Classical stairs/ledges | CHAMP / Quad-SDK | `launch/stairs_ledges_go2.launch.py`, `walk_quadsdk_go2.sh` |
+
+```bash
+# Fetch / refresh .pt files (gitignored)
+python3 scripts/download_pretrained.py
+python3 scripts/download_pretrained.py --list
+```
+
+Headless smoke checks, no GUI:
+
+```bash
+# Flat SB3 walk, quick load and motion check
+python3 training/play_policy.py \
+  --model training/logs/mujoco/best_model.zip \
+  --vecnorm training/logs/mujoco/vecnorm_final.pkl \
+  --no-display --episodes 1 --max-steps 100 --cmd 0.5 0 0
+
+# Blind stairs SB3 checkpoint, longer smoke check
+python3 training/play_policy.py \
+  --model training/logs/stairs/best_model.zip \
+  --vecnorm training/logs/stairs/vecnorm_final.pkl \
+  --scene stairs --blind \
+  --no-display --episodes 2 --max-steps 300
+```
+
+Current local check results:
+
+| Checkpoint | Command mode | Result |
+|------------|--------------|--------|
+| `training/logs/mujoco/best_model.zip` | flat, 1 episode, 100 steps | PASS, moved forward |
+| `training/logs/stairs/best_model.zip` | stairs, blind, 2 episodes, 300 steps | PASS, moved forward, 0% fall rate |
+| `training/pretrained/go2_locomotion/flat_model_6800.pt` | SB3 `play_policy.py` | Expected failure: `.pt` is not an SB3 checkpoint |
+
+Fine-tune flat walk in-place:
+
+```bash
+python3 training/train_mujoco.py \
+  --resume training/logs/mujoco/checkpoints/go2_mujoco_3400000_steps.zip \
+  --vecnorm training/logs/mujoco/checkpoints/vecnorm_3400000_steps.pkl \
+  --learning_rate 0.00005 \
+  --n_epochs 5 \
+  --timesteps 1000000
+```
+
+Fine-tune flat walk into blind stairs:
+
+```bash
+./scripts/train_stairs.sh --blind --init-from-flat --n_envs 4 --timesteps 300000 --device cpu
+```
+
+Official Unitree `unitree_rl_gym` currently ships humanoid `motion.pt` only (G1/H1) — no Go2 file in that tree. Details, Drive links for Isaac Lab parkour teacher/student, and Extreme Parkour forks: **[docs/PRETRAINED.md](docs/PRETRAINED.md)**.
+
+![Go2 RL policy in MuJoCo viewer](docs/images/go2_policy.png)
 
 ### SLAM and Mapping
 
@@ -573,11 +717,24 @@ the explorer's control loop runs at 10Hz for exactly that reason, only the
 Runs in an isolated `ROS_DOMAIN_ID` (default `157`) and `GZ_PARTITION`
 (default `quad3dslam`) so it doesn't cross-talk with other ROS2/Gazebo
 sessions on the same machine — override both via launch args if you want to
-share a domain with another terminal.
+share a domain with another terminal. FastDDS's default port math only
+allows domain IDs **0–232**; higher values die with
+`Calculated port number is too high`.
 
 ```bash
 ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
   ros_domain_id:=200 world:="$(pwd)/training/envs/go2_multi_terrain.sdf"
+```
+
+For a closed indoor loop (two rooms + doorway — better for finishing a
+frontier map than the open outdoor worlds), use the room world. Optional
+`track_obstacles:=true` starts `scripts/obstacle_tracker_go2.py`, which
+clusters the 3D lidar cloud and Kalman-tracks nearby obstacles on
+`/obstacle_tracker/state` + `/obstacle_tracker/markers`:
+
+```bash
+ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
+  track_obstacles:=true world:="$(pwd)/training/envs/go2_gz_world_room.sdf"
 ```
 
 **`locomotion:=nmpc`** swaps CHAMP out for Quad-SDK's NMPC backend instead
@@ -655,11 +812,24 @@ VecNormalize stats are auto-detected from the checkpoint directory.
 
 ![Go2 MuJoCo policy viewer](docs/images/go2_policy.png)
 
-> **Status:** the old stall-reward bug here (policy collecting near-max reward by standing still) is fixed and verified — `best_model.zip` walks a full 20s episode without falling at `cmd=(0.5, 0, 0)`.
+> **Status:** the old stall-reward bug here (policy collecting near-max reward by standing still) has been fixed in the reward code, but the saved SB3 checkpoints still need more training/selection. In quick headless checks, `go2_mujoco_final.zip` falls early and `best_model.zip` is sensitive to the matching VecNormalize stats. Treat the current checkpoints as starting points for fine-tuning, not final walking policies.
 >
 > **Known issue (root cause found, fix untrained):** the `reach` reward component never actually trained the arm at all, at any curriculum level. `REACH_SIGMA=0.12`'s `exp(-(d/sigma)^2)` kernel underflows to ~0 anywhere past ~0.3m, but the stow pose starts the fingertip ~0.5-0.7m from a freshly sampled target — outside the kernel's support from step one. Checking `reward_components` on `best_model.zip` confirms `reach` sits at ~1e-8 for the entire episode: the eval reward peak of 462.97±4.57 at curriculum_level≈0.85 was pure locomotion, the arm never moved toward its target, and the later collapse to ~140 by 2.8M steps was the walk+reach curriculum (capped at `MAX_CURRICULUM_LEVEL=0.85`, see the constant's comment) still pushing command speed harder than the policy could hold — unrelated to the arm, which was never contributing reward to begin with. Fix applied: `REACH_DENSE_WEIGHT * max(0, 1 - reach_dist/REACH_DENSE_NORM)`, a linear term with a real gradient across the actual starting-distance range, added alongside the sigma kernel (which still handles fine-precision near the goal). Not yet trained against — `best_model.zip` predates this change, so its arm behavior should not be trusted as representative of the reach task at all.
 
 ```bash
+# Headless check, exits with PASS/FAIL
+python3 training/play_policy.py \
+  --model training/logs/mujoco/best_model.zip \
+  --vecnorm training/logs/mujoco/vecnorm_final.pkl \
+  --no-display --episodes 1 --max-steps 100 --cmd 0.5 0 0
+
+# Headless stairs check, exits with PASS/FAIL
+python3 training/play_policy.py \
+  --model training/logs/stairs/best_model.zip \
+  --vecnorm training/logs/stairs/vecnorm_final.pkl \
+  --scene stairs --blind \
+  --no-display --episodes 2 --max-steps 300
+
 # Auto-detect vecnorm stats from the same directory as the model
 python3 training/play_policy.py --model training/logs/mujoco/best_model.zip
 
@@ -885,6 +1055,29 @@ What's actually worth doing next, in priority order:
 5. **Wire the [manipulator arm](#manipulator-arm) into something that does work.** It's mounted and visually verified but purely decorative right now — no RL task, no IK, no quad_sdk/CHAMP awareness of the extra mass and links.
 6. ~~Wire the arm into the MuJoCo RL policy; fix the native-Gazebo RL reward.~~ **Arm wired into MuJoCo RL (19-DOF, 76-dim obs, walk+reach reward); Gazebo RL reward bug fixed; both need more training/verification.** `go2_mujoco_env.py` now trains a combined walk+arm-reach policy — this is a separate objective from item 5's IK-based arm, and unrelated to item 3's IK-trot gait-phase fix. Along the way: (a) `train_mujoco.py` only wrote `curriculum_level.txt` at clean exit, so an interrupted run (crash/OOM/preemption) would resume with a stale curriculum against an already-advanced checkpoint — now saved every 50k steps alongside the VecNormalize checkpoint; (b) `PPO()` had no `target_kl`, and training logs showed `approx_kl` climbing 0.017→0.10 and `clip_fraction` 0.2→0.6 unbounded over 3M steps while eval reward collapsed from a peak of 458 to ~120 and never recovered — `target_kl=0.03` (fresh and resumed runs) softened but didn't fully fix this, see the "Known issue" under [Play Trained Policy](#play-trained-policy-opencv-viewer) — that section now also covers a separate, deeper bug found in the `reach` reward term itself; (c) separately, `Go2GazeboEnv`'s RL reward compared angular roll-rate against the linear-speed command (never rewarded actual translation) and reused the pre-fix `>0.5` tilt threshold — both fixed, see the Gazebo backend section above; (d) `train_gazebo.py`'s `EvalCallback` was evaluating on the exact same live env instance PPO trained on, corrupting in-progress rollouts every 10k steps — removed, no substitute eval env exists yet since Gazebo isn't cheaply parallelizable like MuJoCo. No Gazebo-backend RL checkpoint has been trained against these fixes yet.
 
+## Additional Docs
+
+| Doc | Contents |
+|-----|----------|
+| [DEMOS.md](docs/DEMOS.md) | Indoor autonomy, stairs/ledges launch, stack checker, rosbag, Gazebo RL eval |
+| [PRETRAINED.md](docs/PRETRAINED.md) | Model names, local paths, and usage notes |
+| [papers/README.md](docs/papers/README.md) | 14 local PDFs: StairMaster, blind stairs, Robot/Extreme/ANYmal parkour, LEEPS, SoloParkour, RMA, … |
+| [BENCHMARKS.md](docs/BENCHMARKS.md) | RL / autonomy / backend comparison tables |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | SLAM, obstacle tracking, Gazebo RL, RViz checks |
+| [PROJECT_GROWTH_PLAN.md](docs/PROJECT_GROWTH_PLAN.md) | Feature and structure checklist |
+| [quadsdk_notes.md](docs/quadsdk_notes.md) | Quad-SDK terrain test notes |
+| [training/terrain/README.md](training/terrain/README.md) | Stair/ledge generators + Unitree terrain_tool |
+
+### Demo media (`docs/images/`)
+
+| File | Shows |
+|------|-------|
+| `go2_walking.gif` | Quad-SDK NMPC walk |
+| `go2_slam3d_pointcloud.png` | 3D LiDAR / RTAB-Map cloud |
+| `go2_slam_2d_room.png` | 2D SLAM room map |
+| `go2_policy.png` | MuJoCo RL policy viewer |
+| `go2_manipulator_arm.png` | Go2 + arm |
+
 ---
 
 ## References
@@ -893,3 +1086,9 @@ What's actually worth doing next, in priority order:
 - [Unitree RL Gym](https://github.com/unitreerobotics/unitree_rl_gym) — PPO policy training
 - [legged_gym (ETH Zurich)](https://github.com/leggedrobotics/legged_gym) — original RL gym
 - [Isaac Lab](https://github.com/isaac-sim/IsaacLab) — modern GPU training framework
+- [docs/papers](docs/papers/README.md) — StairMaster, blind stairs, Robot/Extreme/ANYmal parkour, LEEPS, SoloParkour, PGTT, RMA, Walk These Ways, FR-Net, DreamRiser (PDFs)
+- [docs/PRETRAINED.md](docs/PRETRAINED.md) — SB3 walk + Go2 locomotion/parkour `.pt` downloads
+- [IsaacLab-Quadruped-Tasks](https://github.com/felipemohr/IsaacLab-Quadruped-Tasks) — Go2 stairs RL tasks
+- [Robot Parkour Learning](https://github.com/ZiwenZhuang/parkour) — gaps / climb / crawl
+- [Extreme Parkour](https://github.com/chengxuxin/extreme-parkour) — fast parkour training
+- [HF Go2 parkour checkpoints](https://huggingface.co/real-jiashu-yu/parkour-drl-checkpoints) — RPL / visual distill weights

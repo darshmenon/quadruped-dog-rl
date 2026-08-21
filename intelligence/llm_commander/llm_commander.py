@@ -36,15 +36,20 @@ JSON format:
   "linear_x": <float, forward/back m/s, range -1.5 to 1.5>,
   "linear_y": <float, strafe left/right m/s, range -0.5 to 0.5>,
   "angular_z": <float, turn rad/s, range -1.5 to 1.5>,
-  "gait": <"stand" | "walk" | "trot" | "canter" | "bound">,
-  "action": <"move" | "stop" | "sit" | "stand">,
+  "gait": <"stand" | "crouch" | "sit" | "walk" | "trot" | "pace" | "canter" | "bound" | "pronk">,
+  "action": <"move" | "stop" | "sit" | "crouch" | "stand" | "jump">,
+  "jump_height": <float, meters above stand, 0 if not jumping>,
   "description": <one-line summary of command>
 }
 
 Rules:
 - "stop", "halt", "freeze" -> all zeros, action: stop
-- "sit", "lie down" -> action: sit
+- "sit", "lie down" -> action: sit, gait: sit
+- "crouch", "lower" -> action: crouch, gait: crouch
 - "stand up", "get up" -> action: stand, gait: stand
+- "jump", "hop" -> action: jump, jump_height: 0.15 to 0.25
+- "jump forward" -> action: jump, landing ahead ~0.4m
+- "pronk", "bound", "pace" -> matching gait name
 - Speeds: slowly=0.3, normal=0.6, fast=1.2
 - Turning: slightly=0.3, turn=0.8, sharp=1.5
 """

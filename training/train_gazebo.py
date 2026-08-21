@@ -39,15 +39,22 @@ def main():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--no-launch", action="store_true",
                         help="don't auto-launch Gazebo (use externally running sim)")
+    parser.add_argument("--ros-domain-id", default="177",
+                        help="ROS_DOMAIN_ID isolating this run from other concurrent "
+                             "ROS2/Gazebo sessions on this machine")
+    parser.add_argument("--gz-partition", default="go2rltrain",
+                        help="GZ_PARTITION isolating this run's Gazebo transport")
     args = parser.parse_args()
 
     os.makedirs(CKPT_DIR, exist_ok=True)
     cmd = tuple(args.cmd)
 
-    print(f"Training Go2 (Gazebo) | cmd={cmd} | steps={args.timesteps}")
+    print(f"Training Go2 (Gazebo) | cmd={cmd} | steps={args.timesteps} | "
+          f"ROS_DOMAIN_ID={args.ros_domain_id} GZ_PARTITION={args.gz_partition}")
     print("Launching Gazebo headlessly..." if not args.no_launch else "Using existing Gazebo...")
 
-    env = Monitor(Go2GazeboEnv(cmd=cmd, auto_launch=not args.no_launch))
+    env = Monitor(Go2GazeboEnv(cmd=cmd, auto_launch=not args.no_launch,
+                                ros_domain_id=args.ros_domain_id, gz_partition=args.gz_partition))
 
     # No EvalCallback here: unlike the MuJoCo backend, Go2GazeboEnv wraps one
     # live Gazebo sim reached over global ROS2 topics (/joint_states, /odom,

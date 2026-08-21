@@ -27,29 +27,33 @@ from envs.go2_mujoco_vision_env import Go2MujocoVisionEnv
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs", "vision_compare")
 
 
-def make_env(cmd, use_vision, rank, seed=0):
+def make_env(cmd, use_vision, rank, seed=0, gait_conditioned=False):
     def _init():
         env = Go2MujocoVisionEnv(cmd=cmd, render_mode=None,
                                  randomize_domain=True, use_curriculum=True,
-                                 use_vision=use_vision)
+                                 use_vision=use_vision,
+                                 gait_conditioned=gait_conditioned)
         env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
     return _init
 
 
-def train_one(tag, use_vision, cmd, n_envs, timesteps):
+def train_one(tag, use_vision, cmd, n_envs, timesteps, gait_conditioned=False):
     run_dir = os.path.join(LOG_DIR, tag)
     os.makedirs(run_dir, exist_ok=True)
 
-    vec_env = DummyVecEnv([make_env(cmd, use_vision, i) for i in range(n_envs)])
+    vec_env = DummyVecEnv([
+        make_env(cmd, use_vision, i, gait_conditioned=gait_conditioned)
+        for i in range(n_envs)])
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
                            clip_obs=10.0, clip_reward=10.0)
 
     eval_raw = Monitor(Go2MujocoVisionEnv(cmd=cmd, render_mode=None,
                                           randomize_domain=False,
                                           use_curriculum=False,
-                                          use_vision=use_vision))
+                                          use_vision=use_vision,
+                                          gait_conditioned=gait_conditioned))
     eval_env = VecNormalize(DummyVecEnv([lambda: eval_raw]),
                             norm_obs=True, norm_reward=False, training=False)
 
@@ -81,7 +85,7 @@ def train_one(tag, use_vision, cmd, n_envs, timesteps):
                     render=False),
     ]
 
-    print(f"\n=== training {tag} (use_vision={use_vision}) ===")
+    print(f"\n=== training {tag} (use_vision={use_vision}, gait={gait_conditioned}) ===")
     model.learn(total_timesteps=timesteps, callback=callbacks)
     model.save(os.path.join(run_dir, f"{tag}_final"))
     vec_env.save(os.path.join(run_dir, "vecnorm_final.pkl"))
@@ -105,13 +109,17 @@ def main():
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--cmd", type=float, nargs=3, default=[0.4, 0.0, 0.0],
                         metavar=("LIN_X", "LIN_Y", "ANG_YAW"))
+    parser.add_argument("--gait", action="store_true",
+                        help="enable gait-conditioned clocks on both blind and sighted runs")
     args = parser.parse_args()
     cmd = tuple(args.cmd)
 
     os.makedirs(LOG_DIR, exist_ok=True)
     results = {}
     for tag, use_vision in (("blind", False), ("sighted", True)):
-        results[tag] = train_one(tag, use_vision, cmd, args.n_envs, args.timesteps)
+        results[tag] = train_one(
+            tag, use_vision, cmd, args.n_envs, args.timesteps,
+            gait_conditioned=args.gait)
 
     print("\n=== eval mean-reward curves (rough terrain) ===")
     for tag, curve in results.items():

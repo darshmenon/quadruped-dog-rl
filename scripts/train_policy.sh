@@ -39,8 +39,12 @@ case "$BACKEND" in
     cd "$ROOT/training"
     "$PYTHON_BIN" legged_gym/scripts/train.py --task="$TASK" "$@"
     ;;
+  stairs)
+    echo "Backend: MuJoCo stairs / ledges"
+    "$PYTHON_BIN" "$ROOT/training/train_stairs.py" "$@"
+    ;;
   *)
-    echo "Unknown backend: $BACKEND. Use mujoco | gazebo | isaac"
+    echo "Unknown backend: $BACKEND. Use mujoco | gazebo | isaac | stairs"
     exit 1
     ;;
 esac

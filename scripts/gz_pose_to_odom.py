@@ -78,9 +78,14 @@ class GazeboPoseOdom(Node):
                 text=True,
                 timeout=0.25,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, PermissionError, OSError):
+            # TimeoutExpired can itself raise PermissionError when the
+            # runtime can't SIGKILL the hung `gz topic` child (sandbox /
+            # restricted environments) -- treat that the same as a miss.
             return
 
+        if result.returncode != 0:
+            return
         pose = _parse_pose(result.stdout, self.model)
         if pose is None:
             return
