@@ -460,21 +460,31 @@ class Go2MujocoEnv(gym.Env):
         contacts  = self._get_contacts()
         r_contact = 0.15 * min(float(np.sum(contacts > 0.3)) / 2.0, 1.0)
 
-        ee_pos = d.sensor("ee_pos").data.astype(np.float32)
-        reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
-        r_reach = REACH_WEIGHT * float(np.exp(-(reach_dist ** 2) / (REACH_SIGMA ** 2)))
-        r_reach_dense = REACH_DENSE_WEIGHT * max(0.0, 1.0 - reach_dist / REACH_DENSE_NORM)
-        r_reach_mid = (REACH_MID_WEIGHT
-                       if REACH_SUCCESS_DIST <= reach_dist < REACH_MID_RADIUS else 0.0)
-        r_reach_bonus = REACH_SUCCESS_BONUS if reach_dist < REACH_SUCCESS_DIST else 0.0
-
         # Explicit stall penalty: standing still while a real command is
         # active must never out-earn walking, no matter how forgiving the
         # tracking kernel above is (previously the policy converged to
         # standing still — see README "Known issue").
         cmd_speed = float(np.hypot(self.cmd[0], self.cmd[1]))
         actual_speed = float(np.hypot(lin_vel[0], lin_vel[1]))
-        r_stall = -0.6 if (cmd_speed > 0.15 and actual_speed < 0.3 * cmd_speed) else 0.0
+        is_stalling = cmd_speed > 0.15 and actual_speed < 0.3 * cmd_speed
+        r_stall = -0.6 if is_stalling else 0.0
+
+        ee_pos = d.sensor("ee_pos").data.astype(np.float32)
+        reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
+        # Once REACH_WEIGHT was raised to match locomotion's scale, standing
+        # still and just reaching (eating the -0.6 stall penalty) became more
+        # profitable than actually walking-while-reaching -- confirmed by
+        # play_policy.py eval on trained checkpoints showing dist=0.00m,
+        # mean_vx~=0.00 despite reach/reach_dense/reach_mid all firing and
+        # ep_rew_mean far above any historical walking-only peak. Gating all
+        # reach terms off during a stall closes that exploit at the source
+        # instead of trying to out-tune the stall penalty's magnitude.
+        reach_gate = 0.0 if is_stalling else 1.0
+        r_reach = reach_gate * REACH_WEIGHT * float(np.exp(-(reach_dist ** 2) / (REACH_SIGMA ** 2)))
+        r_reach_dense = reach_gate * REACH_DENSE_WEIGHT * max(0.0, 1.0 - reach_dist / REACH_DENSE_NORM)
+        r_reach_mid = reach_gate * (REACH_MID_WEIGHT
+                       if REACH_SUCCESS_DIST <= reach_dist < REACH_MID_RADIUS else 0.0)
+        r_reach_bonus = reach_gate * (REACH_SUCCESS_BONUS if reach_dist < REACH_SUCCESS_DIST else 0.0)
 
         r_air, r_slip = self._air_time_and_slip(contacts)
         r_col = -COLLISION_WEIGHT * float(self._nonfoot_collision_count())

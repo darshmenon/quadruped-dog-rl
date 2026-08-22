@@ -11,33 +11,51 @@ import numpy as np
 from envs.go2_gazebo_env import CTRL_DT, Go2GazeboEnv
 
 
-def _load_model(path):
+def _load_model(path, env):
     if not path:
         return None
     from stable_baselines3 import PPO
-    return PPO.load(path)
+    return PPO.load(path, env=env)
 
 
-def _action(model, obs, env):
+def _action(model, obs, action_shape):
     if model is None:
-        return np.zeros(env.action_space.shape, dtype=np.float32)
+        return np.zeros(action_shape, dtype=np.float32)
     act, _ = model.predict(obs, deterministic=True)
     return act
 
 
 def evaluate(args):
-    env = Go2GazeboEnv(
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    qpos_reference = None
+    if args.recovery_pose:
+        from envs.go2_mujoco_recovery_env import ACT_CURL
+        qpos_reference = ACT_CURL
+
+    raw = Go2GazeboEnv(
         cmd=tuple(args.cmd),
         auto_launch=not args.no_launch,
         ros_domain_id=args.ros_domain_id,
         gz_partition=args.gz_partition,
+        qpos_reference=qpos_reference,
     )
-    model = _load_model(args.model)
+    env = DummyVecEnv([lambda: raw])
+    if args.vecnorm:
+        env = VecNormalize.load(args.vecnorm, env)
+        env.training = False
+        env.norm_reward = False
+        print(f"VecNormalize stats: {args.vecnorm}")
+    else:
+        print("No VecNormalize stats given -- running without obs normalisation "
+              "(policies trained with VecNormalize will behave incorrectly)")
+
+    model = _load_model(args.model, env)
     rows = []
 
     try:
         for ep in range(args.episodes):
-            obs, _ = env.reset()
+            obs = env.reset()
             start = time.monotonic()
             start_pos = None
             end_pos = None
@@ -47,12 +65,13 @@ def evaluate(args):
             truncated = False
 
             while not (terminated or truncated):
-                odom_vel = env._node.get_lin_vel()
+                odom_vel = raw._node.get_lin_vel()
                 if start_pos is None:
                     start_pos = np.zeros(2, dtype=np.float32)
-                act = _action(model, obs, env)
-                obs, reward, terminated, truncated, _ = env.step(act)
-                rewards.append(float(reward))
+                act = _action(model, obs, raw.action_space.shape)
+                obs, reward, done, _ = env.step(act)
+                terminated = bool(done[0])
+                rewards.append(float(reward[0]))
                 speeds.append(float(np.linalg.norm(odom_vel[:2])))
                 if len(rewards) >= args.max_steps:
                     truncated = True
@@ -92,6 +111,14 @@ def main():
     parser.add_argument("--cmd", type=float, nargs=3, default=[0.5, 0.0, 0.0])
     parser.add_argument("--no-launch", action="store_true",
                         help="use an already running Gazebo RL sim")
+    parser.add_argument("--vecnorm", default=None,
+                        help="VecNormalize .pkl stats matching --model -- required for "
+                             "correct behavior on any policy trained with VecNormalize "
+                             "(obs are otherwise fed in raw, unnormalised)")
+    parser.add_argument("--recovery-pose", action="store_true",
+                        help="use the fall-recovery env's curled ACT_CURL pose as the "
+                             "dof_pos reference instead of this env's own standing "
+                             "DEFAULT_QPOS -- needed when --model is a recovery policy")
     parser.add_argument("--ros-domain-id", default="177")
     parser.add_argument("--gz-partition", default="go2rleval")
     parser.add_argument("--csv", default=None,

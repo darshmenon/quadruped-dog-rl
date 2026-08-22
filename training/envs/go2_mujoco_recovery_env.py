@@ -190,8 +190,19 @@ class Go2MujocoRecoveryEnv(gym.Env):
         self.model.actuator_biasprm[:12, 1] = self._base_biasprm1 * kp_scale
 
     def _is_upright(self, gravity: np.ndarray | None = None) -> bool:
+        # Termination/threshold curriculum: the hard -0.7 bar was never once
+        # crossed even after 2M+ steps of orient_gauss/stand climbing (both
+        # give continuous partial credit for *approaching* upright, but the
+        # discrete is_success/upright_frac check requires fully crossing a
+        # fixed threshold from step one -- a known PPO failure mode where a
+        # too-strict binary condition stays at 0 no matter how much the
+        # shaped reward improves). Loosen the bar early in curriculum_level
+        # and tighten it back to the real target as the policy improves, same
+        # curl->stand pattern _stand_target() already uses.
         g = self._gravity_vec() if gravity is None else gravity
-        return bool(g[2] < -0.7 and float(self.data.qpos[2]) > 0.25)
+        t = float(self.curriculum_level)
+        gravity_thresh = -0.3 - 0.4 * t   # -0.3 (easy) -> -0.7 (true target)
+        return bool(g[2] < gravity_thresh and float(self.data.qpos[2]) > 0.25)
 
     def _get_obs(self) -> np.ndarray:
         ang_vel = self.data.sensor("ang_vel").data.astype(np.float32) * 0.25

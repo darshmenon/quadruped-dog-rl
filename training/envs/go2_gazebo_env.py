@@ -134,13 +134,23 @@ class Go2GazeboEnv(gym.Env):
     """Gymnasium env that wraps a running Gazebo simulation via ROS2."""
 
     def __init__(self, cmd=(0.5, 0.0, 0.0), auto_launch=True,
-                 ros_domain_id="177", gz_partition="go2rltrain"):
+                 ros_domain_id="177", gz_partition="go2rltrain",
+                 qpos_reference=None):
         super().__init__()
         if not HAS_ROS:
             raise RuntimeError("rclpy not available. Source ROS2 setup.bash first.")
 
         self.cmd = np.array(cmd, dtype=np.float32)
         self._proc = None
+        # dof_pos in _build_obs is (jpos - reference) -- must match whatever
+        # pose a given policy was trained relative to. Defaults to this env's
+        # own standing pose (DEFAULT_QPOS); pass e.g. the recovery env's
+        # ACT_CURL (curled) reference when evaluating a fall-recovery policy,
+        # otherwise dof_pos is silently computed against the wrong baseline.
+        self._qpos_reference = (
+            DEFAULT_QPOS if qpos_reference is None
+            else np.asarray(qpos_reference, dtype=np.float32)
+        )
 
         # Isolate from other concurrent ROS2/Gazebo sessions on this machine
         # (e.g. launch/slam3d_go2.launch.py on domain 157) -- both the
@@ -202,7 +212,7 @@ class Go2GazeboEnv(gym.Env):
             1 - 2 * (w * w + z * z),
         ], dtype=np.float32)
         cmd_scaled = self.cmd * np.array([2.0, 2.0, 0.25], dtype=np.float32)
-        dof_pos = (jpos - DEFAULT_QPOS) * 1.0
+        dof_pos = (jpos - self._qpos_reference) * 1.0
         dof_vel = jvel * 0.05
         return np.concatenate([
             ang_vel * 0.25, gravity, cmd_scaled,
