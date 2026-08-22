@@ -8,7 +8,7 @@
 A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, with three interchangeable locomotion backends and an RL training pipeline built on top.
 
 **What's working right now:**
-- **RL locomotion (primary focus)**: a PPO policy trained end-to-end in MuJoCo — no hand-written gait, no IK, just observations in and joint targets out — learns to walk the Go2 from scratch (domain randomization, curriculum, 8-term reward). A second pipeline trains and compares **blind vs. sighted** policies on procedurally randomized rough, multi-terrain ground with scattered obstacles and an 18-point height-scan observation. See [RL Policy Training](#rl-policy-training).
+- **RL locomotion (primary focus)**: a PPO policy trained end-to-end in MuJoCo — no hand-written gait, no IK, just observations in and joint targets out — learns to walk the Go2 from scratch (domain randomization, curriculum, 8-term reward). A second pipeline trains and compares **blind vs. sighted** policies on procedurally randomized rough, multi-terrain ground with scattered obstacles and an 18-point height-scan observation. A third trains **fall recovery** (FR-Net-style get-up from random fallen poses). See [RL Policy Training](#rl-policy-training).
 - **Stairs & ledges**: Gazebo + MuJoCo courses (solid stair curriculum, platforms, gaps, hollow open-riser stairs) with one-command CHAMP walk. See [Stairs & ledge worlds](#stairs--ledge-worlds).
 - **Go2 model weights**: local Stable-Baselines3 `.zip` walk checkpoints can be resumed and improved in this repo; downloadable Isaac/rsl_rl/Genesis `.pt` files use their upstream stacks. See [Go2 model files](docs/PRETRAINED.md).
 - **Research library**: 14 local PDFs on stair climbing, parkour, recovery, and adaptation under [docs/papers/](docs/papers/README.md).
@@ -465,6 +465,76 @@ Output: `training/logs/vision_compare/{blind,sighted}/` (checkpoints, `evaluatio
 Status: the env and obstacle placement are smoke-tested (import, reset, N random steps, both `use_vision` settings, obstacles forced active at max curriculum) — not yet a full trained-and-evaluated comparison, so treat blind-vs-sighted reward numbers as unverified until a full run's `evaluations.npz` has been checked.
 
 > **Fixed bug (worth knowing if you see `ep_len_mean` stuck at 1):** `_terrain_height_under_base()`/`_height_scan()` ray-cast straight down from above the base to measure height above ground. The ray originally checked every geom, including the robot's own base box directly beneath the ray origin, so it hit itself instead of the terrain and reported the robot as already below the ground on every single reset — instant termination, every episode, regardless of policy. Fixed by putting the floor and obstacle geoms in MuJoCo geom group 1 and restricting the ray to that group (robot geoms stay in the default group 0), so it can no longer self-intersect.
+
+### Fall recovery (MuJoCo, FR-Net-style)
+
+Addresses the walk policy falling ~1.5–2 s into eval episodes by training a **separate get-up policy**. Ported from the FR-Net `go2_recovery` baseline ([lu-yidan/FR-Net](https://github.com/lu-yidan/FR-Net), also mirrored under `~/quad_inspo_2026/`) onto this repo’s MuJoCo + SB3 stack:
+
+- Random unit-quaternion spawn each reset (arbitrary fallen pose); curled leg PD reference; arm held at stow
+- **45-dim** proprio obs + **12-DOF** leg actions (same layout as FR-Net; no mass-contact estimator)
+- Rewards: orientation Gaussian + height + foot contact + stand-pose curriculum, with `only_positive_rewards` clipping
+
+```bash
+python3 training/envs/go2_mujoco_recovery_env.py          # smoke
+python3 training/train_recovery.py --timesteps 1000000 --n_envs 8
+python3 training/train_recovery.py --rough --timesteps 500000   # rough scene spawn patch
+./scripts/train_recovery.sh --rough
+python3 training/play_recovery.py --model training/logs/recovery/best_model.zip
+python3 training/play_recovery.py --no-display --episodes 3   # random-action baseline
+```
+
+Logs: `training/logs/recovery/`. Compose with the walk policy (detect fall → recover → stand-hold → resume walk):
+
+```bash
+python3 training/play_composed.py \
+  --walk training/logs/mujoco/best_model.zip \
+  --recovery training/logs/recovery/best_model.zip \
+  --force-fall-step 80 --no-display --episodes 2
+```
+
+### New Gazebo courses (arena / warehouse / moving obstacle)
+
+```bash
+ros2 launch launch/arena_go2.launch.py
+ros2 launch launch/warehouse_go2.launch.py
+ros2 launch launch/moving_obstacle_go2.launch.py
+# or explicitly:
+ros2 launch launch/champ_go2_gazebo.launch.py \
+  world:=$(pwd)/training/envs/go2_gz_world_arena.sdf
+ros2 launch launch/champ_go2_gazebo.launch.py \
+  world:=$(pwd)/training/envs/go2_gz_world_warehouse.sdf
+ros2 launch launch/champ_go2_gazebo.launch.py \
+  world:=$(pwd)/training/envs/go2_gz_world_moving.sdf
+# then: python3 scripts/moving_obstacle_gz.py
+```
+
+Fuel downloads + upstream packs: `python3 scripts/download_worlds.py` — see [training/envs/worlds/README.md](training/envs/worlds/README.md).
+
+### Asymmetric critic + staged curriculum (DreamWaQ-lite / go2-lab)
+
+**Asymmetric actor-critic** (`--asymmetric`): actor sees deployable proprio only; critic also gets true base `lin_vel` from `info["privileged"]`. No CENet — portable SB3 `AsymmetricActorCriticPolicy`.
+
+```bash
+python3 training/train_mujoco.py --asymmetric --obs-history 5
+python3 training/play_policy.py --model training/logs/mujoco_asym/best_model.zip --asymmetric
+```
+
+**Staged curriculum** (`train_curriculum.py`): flat walk → rough blind → stairs, each stage resumes the previous checkpoint:
+
+```bash
+python3 training/train_curriculum.py --asymmetric --obs-history 5 --gait
+./scripts/train_curriculum.sh --stages flat rough --timesteps 500000
+```
+
+Logs: `training/logs/mujoco_curriculum/{flat,rough,stairs}/`.
+
+**HL navigation** (HelixNav-lite): frozen walk policy + HL PPO outputs `(vx, vy, wz)` to reach random planar goals:
+
+```bash
+python3 training/train_hl_nav.py \
+  --walk-model training/logs/mujoco/best_model.zip \
+  --timesteps 200000
+```
 
 ### Gazebo backend (Gazebo Harmonic + ROS2)
 
@@ -1053,6 +1123,7 @@ What's actually worth doing next, in priority order:
 3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Root-caused and fixed, untested in sim.** `leg_phases` was initialized from `Gait.STAND`'s `phase_offsets` (`[0,0,0,0]`) and then advanced every tick by the *same* scalar increment applied to all four elements — so all four legs stayed perfectly in phase forever, and every non-STAND gait's `phase_offsets` (e.g. WALK's `[0, 0.5, 0.25, 0.75]`) were computed but never actually applied per leg. All four feet swung simultaneously during the non-duty fraction of each cycle, dropping the body with zero ground support and tripping `stand_go2_gz.py`'s fall-detector. Fixed in `scripts/stand_go2_gz.py`, `scripts/teleop_go2_gz.py`, `scripts/cmd_vel_go2_gz.py`, and `training/headless_control.py` (all four had the same duplicated bug): now a scalar cycle phase advances each tick, and the active gait's `phase_offsets` are added back in per leg before computing foot targets. Verified via a standalone phase-accumulation check that legs now stagger correctly for WALK — not yet verified against a live Gazebo run.
 4. ~~Evaluate the new multi-terrain RL pipeline.~~ **Evaluated — no meaningful blind/sighted gap found.** Both `train_vision_compare.py` runs (200k steps each) finished; regenerated `blind_vs_sighted.png` from their `evaluations.npz`. Final eval mean reward: blind `305.7`, sighted `307.8` — within noise of each other, so the height-scan observation isn't yet producing the expected rough-terrain advantage. Worth a longer run or a harder terrain curriculum before drawing conclusions either way.
 5. **Wire the [manipulator arm](#manipulator-arm) into something that does work.** It's mounted and visually verified but purely decorative right now — no RL task, no IK, no quad_sdk/CHAMP awareness of the extra mass and links.
+5b. ~~Fall-recovery MuJoCo env (FR-Net-style).~~ **Added** (`train_recovery.py` / `play_recovery.py`) — needs a full train + upright-rate eval before composing with the walk policy.
 6. ~~Wire the arm into the MuJoCo RL policy; fix the native-Gazebo RL reward.~~ **Arm wired into MuJoCo RL (19-DOF, 76-dim obs, walk+reach reward); Gazebo RL reward bug fixed; both need more training/verification.** `go2_mujoco_env.py` now trains a combined walk+arm-reach policy — this is a separate objective from item 5's IK-based arm, and unrelated to item 3's IK-trot gait-phase fix. Along the way: (a) `train_mujoco.py` only wrote `curriculum_level.txt` at clean exit, so an interrupted run (crash/OOM/preemption) would resume with a stale curriculum against an already-advanced checkpoint — now saved every 50k steps alongside the VecNormalize checkpoint; (b) `PPO()` had no `target_kl`, and training logs showed `approx_kl` climbing 0.017→0.10 and `clip_fraction` 0.2→0.6 unbounded over 3M steps while eval reward collapsed from a peak of 458 to ~120 and never recovered — `target_kl=0.03` (fresh and resumed runs) softened but didn't fully fix this, see the "Known issue" under [Play Trained Policy](#play-trained-policy-opencv-viewer) — that section now also covers a separate, deeper bug found in the `reach` reward term itself; (c) separately, `Go2GazeboEnv`'s RL reward compared angular roll-rate against the linear-speed command (never rewarded actual translation) and reused the pre-fix `>0.5` tilt threshold — both fixed, see the Gazebo backend section above; (d) `train_gazebo.py`'s `EvalCallback` was evaluating on the exact same live env instance PPO trained on, corrupting in-progress rollouts every 10k steps — removed, no substitute eval env exists yet since Gazebo isn't cheaply parallelizable like MuJoCo. No Gazebo-backend RL checkpoint has been trained against these fixes yet.
 
 ## Additional Docs

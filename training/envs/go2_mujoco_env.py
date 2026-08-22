@@ -1,12 +1,33 @@
 """MuJoCo-based Gymnasium environment for Unitree Go2 locomotion training."""
 
 import os
+import sys
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import mujoco
 
 SCENE_XML = os.path.join(os.path.dirname(__file__), "go2_scene.xml")
+
+# intelligence/ lives at the repo root, two levels up from training/envs/ --
+# not on sys.path by default when this module is imported via training/'s
+# own sys.path.insert (see train_mujoco.py). Pure-Python (math + dataclasses
+# only), so safe to import here without ROS sourced.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from intelligence.manipulation.arm_ik import inverse_kinematics, JOINT_LIMIT
+
+# inverse_kinematics(x, y, z) defaults to wrist_pitch=0 (last link horizontal),
+# which leaves much of the sampled reach-target workspace unreachable: holding
+# the wrist horizontal often forces an elbow bend past its own +/-90deg limit
+# even when the target is well within the arm's overall reach envelope
+# (confirmed empirically -- e.g. a plain 0.35m-forward target already fails
+# at wrist_pitch=0). This task only cares about fingertip position, not
+# end-effector orientation, so Go2MujocoEnv._best_ik_candidate sweeps
+# wrist_pitch and keeps the best-scoring solution rather than assuming 0
+# works (see that method for the collision/margin ranking).
+_WRIST_PITCH_SWEEP = sorted(np.linspace(-JOINT_LIMIT, JOINT_LIMIT, 13), key=abs)
 
 # Arm+gripper stow pose, matches scripts/make_go2_stand.py STANDING_POSE /
 # intelligence/manipulation/arm_reach_node.py STOW_POSE (gripper closed).
@@ -89,14 +110,29 @@ FALL_PENALTY = -8.0    # one-time hit applied on the step that trips termination
 # frame as the ee_pos sensor.
 ARM_MOUNT_POS = np.array([0.08, 0.0, 0.057], dtype=np.float32)
 
-REACH_MIN_RADIUS = 0.12   # closest a target is ever placed from the mount point
-REACH_MAX_RADIUS_EASY = 0.22  # max radius at curriculum_level=0
+# REACH_MIN_RADIUS used to be 0.12 with REACH_MAX_RADIUS_EASY at 0.22 -- empirically
+# (via arm_ik.py's IK across the full yaw/pitch sampling range below) 0% of targets in
+# that band are actually reachable at ANY wrist orientation: holding the fingertip that
+# close to the mount requires an elbow bend past the joint's own +/-90deg limit
+# regardless of wrist_pitch. The "easy" end of the curriculum was asking for targets no
+# controller could ever hit. Reachability climbs sharply from there (~12% at 0.22,
+# ~72% at 0.25, ~100% by 0.28), so the floor needs to sit past that knee.
+REACH_MIN_RADIUS = 0.28   # closest a target is ever placed from the mount point
+REACH_MAX_RADIUS_EASY = 0.32  # max radius at curriculum_level=0
 REACH_MAX_RADIUS_HARD = 0.42  # max radius at curriculum_level=1 (< arm_ik.py's
                                # ~0.51 structural max, so targets stay solvable
                                # across the yaw/elevation range sampled below)
+# _sample_target_and_baseline still rejection-samples against the real (collision-aware)
+# IK solver, not just this radius heuristic -- reachability and self-collision both
+# depend on yaw/pitch too, not radius alone.
 REACH_SUCCESS_DIST = 0.05  # fingertip-to-target distance counted as "reached"
 REACH_SIGMA = 0.12         # width of the reach-distance reward kernel
-REACH_WEIGHT = 0.8
+# Matched to r_lin's scale (2.0) below, not left as a minor auxiliary term --
+# a reach reward smaller than the dominant locomotion term gets washed out by
+# PPO's advantage estimates even once REACH_DENSE_WEIGHT gives it a
+# non-vanishing gradient (see aCodeDog/legged-robots-manipulation's Go2-ARX
+# config, which sets its equivalent term equal to tracking_lin_vel).
+REACH_WEIGHT = 2.0
 
 # The ARM_STOW pose (see DEFAULT_QPOS) tucks the arm down and back so it
 # doesn't interfere with walking -- its fingertip sits ~0.4m from
@@ -113,6 +149,30 @@ REACH_WEIGHT = 0.8
 REACH_DENSE_WEIGHT = 0.3
 REACH_DENSE_NORM = 0.8    # roughly the max plausible stow-to-target distance
 
+# Actuator indices for the 5 arm joints (see actuator-order comment above);
+# these get an IK-baseline target instead of ACT_DEFAULT+action*ACT_SCALE.
+ARM_ACT_SLICE = slice(12, 17)
+# arm_ik.py's analytic IK (already used by the scripted Gazebo pick demo,
+# intelligence/manipulation/pick_demo.py) solves for the exact joint angles
+# that place the fingertip at reach_target, so the policy no longer has to
+# discover inverse kinematics from the distance reward alone -- it only
+# needs to learn a small residual correction (gravity sag, PD tracking
+# error, whole-body coordination while walking). Residual is comparable to
+# ACT_SCALE rather than tiny, so the policy can still override the IK
+# baseline where useful (e.g. briefly retracting the arm for balance).
+ARM_RESIDUAL_SCALE = 0.3
+
+# Bridges the gap between REACH_DENSE (weak linear pull, active everywhere)
+# and REACH_WEIGHT's exp kernel (only meaningful inside ~0.3m) -- nothing
+# previously gave extra incentive to actually cross that boundary, so the
+# dense term could plateau without ever pulling the fingertip close enough
+# for the precision kernel to take over (observed: reach_dense ~0.07-0.09,
+# flat, over 700k+ steps; reach ~0 throughout). Modeled on FR-Net's staged
+# reward gating (coarse precondition unlocks a following-stage reward rather
+# than everything summing unconditionally from the start).
+REACH_MID_RADIUS = 0.25
+REACH_MID_WEIGHT = 0.4
+
 # Two training runs both saw eval reward peak (~460) with curriculum_level
 # around 0.8-0.85 (max cmd speed ~1.0 m/s, reach radius ~0.37m) and then
 # degrade as the episode-length-only success signal kept pushing curriculum_
@@ -125,6 +185,15 @@ REACH_DENSE_NORM = 0.8    # roughly the max plausible stow-to-target distance
 MAX_CURRICULUM_LEVEL = 0.85
 REACH_SUCCESS_BONUS = 0.5
 
+# Mid-episode push DR (get-up-isaaclab / unitree_rl_gym _push_robots) — not
+# previously wired into the Go2 MuJoCo walk env (only mass/friction/Kp DR).
+PUSH_INTERVAL_S = 3.0
+PUSH_VEL_XY = 0.55          # m/s impulse magnitude cap
+COLLISION_WEIGHT = 0.2      # non-foot geom vs floor / self
+SOFT_LIMIT_WEIGHT = 2.0     # soft DoF-limit proximity (unitree_rl_gym style)
+SOFT_LIMIT_MARGIN = 0.05    # rad inside hard range before penalty starts
+GAIT_SYMMETRY_WEIGHT = 0.15 # LocoTouch-style diagonal pair agreement (--gait)
+
 
 class Go2MujocoEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
@@ -132,7 +201,8 @@ class Go2MujocoEnv(gym.Env):
     def __init__(self, cmd=(0.5, 0.0, 0.0), render_mode=None,
                  randomize_domain=True, use_curriculum=True,
                  initial_curriculum_level=0.0, reach_target=None,
-                 gait_conditioned=False, gait_name="trotting"):
+                 gait_conditioned=False, gait_name="trotting",
+                 push_robots=True):
         super().__init__()
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
         self.data = mujoco.MjData(self.model)
@@ -143,9 +213,11 @@ class Go2MujocoEnv(gym.Env):
         self.randomize_domain = randomize_domain
         self.use_curriculum = use_curriculum
         self.gait_conditioned = bool(gait_conditioned)
+        self.push_robots = bool(push_robots)
         self._renderer = None
         self._prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._step_count = 0
+        self._steps_since_push = 0
         self._max_steps = int(EPISODE_LEN_S / (SIM_DT * CTRL_DECIMATION))
         self._last_episode_steps = self._max_steps
 
@@ -154,11 +226,22 @@ class Go2MujocoEnv(gym.Env):
         # play_policy.py), resampled every reset when use_curriculum=True
         # (see reset()). Default is a modest forward reach, not a random
         # sample, so eval runs are reproducible unless the caller asks
-        # otherwise.
+        # otherwise. 0.28m specifically (not e.g. 0.3) because the IK
+        # baseline's destination pose being collision-free doesn't guarantee
+        # the straight-line joint-space path from ARM_STOW to it is too --
+        # 0.3m forward settles >0.5m off target (verified: the destination
+        # pose is valid, but the arm gets stuck on the body en route from
+        # stow); 0.28m verified clean (<3cm) across seeds with zero residual
+        # action (see _best_ik_candidate/_sample_target_and_baseline for the
+        # collision-aware IK selection this depends on).
         self.reach_target = (
             np.array(reach_target, dtype=np.float32) if reach_target is not None
-            else ARM_MOUNT_POS + np.array([0.3, 0.0, 0.0], dtype=np.float32)
+            else ARM_MOUNT_POS + np.array([0.28, 0.0, 0.0], dtype=np.float32)
         )
+        # Recomputed from self.reach_target at the top of every reset()
+        # (see _compute_arm_ik_baseline); this default is only live if
+        # step() were ever called before reset(), which gym doesn't do.
+        self._arm_ik_baseline = np.array(ARM_STOW[:5], dtype=np.float32)
 
         # Gait command: [freq_hz, phase, offset, bound, footswing_m].
         # Clocks and desired contacts are derived each step from these.
@@ -182,9 +265,39 @@ class Go2MujocoEnv(gym.Env):
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, n)
             for n in ("FL_foot", "FR_foot", "RL_foot", "RR_foot")
         ], dtype=np.int32)
+        self._foot_geom_ids = set()
+        for n in ("FL_foot", "FR_foot", "RL_foot", "RR_foot"):
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n)
+            if gid >= 0:
+                self._foot_geom_ids.add(int(gid))
+        # The closed gripper's two fingers always slightly interpenetrate by
+        # design (that's what "closed" means) -- exclude their mutual contact
+        # from arm-placement collision checks (_best_ik_candidate) so it isn't
+        # mistaken for the arm colliding with the leg/torso. The finger geoms
+        # themselves are unnamed in go2_scene.xml (only their parent bodies
+        # are), so look them up by body id rather than mj_name2id(GEOM, ...).
+        self._finger_geom_ids = set()
+        for n in ("left_finger", "right_finger"):
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, n)
+            if bid >= 0:
+                self._finger_geom_ids.update(
+                    int(g) for g in range(self.model.ngeom)
+                    if self.model.geom_bodyid[g] == bid)
+        # Freejoint has no limits; hinge joints for legs+arm start at jnt 1.
+        self._hinge_qposadr = []
+        self._hinge_range = []
+        for j in range(self.model.njnt):
+            if self.model.jnt_type[j] != mujoco.mjtJoint.mjJNT_HINGE:
+                continue
+            adr = int(self.model.jnt_qposadr[j])
+            lo, hi = self.model.jnt_range[j]
+            if hi > lo:
+                self._hinge_qposadr.append(adr)
+                self._hinge_range.append((float(lo), float(hi)))
         self._feet_air_time = np.zeros(4, dtype=np.float32)
         self._last_contacts = np.zeros(4, dtype=bool)
         self._foot_vel_buf = np.zeros(6, dtype=np.float64)
+        self._last_push = np.zeros(2, dtype=np.float32)
 
         obs_dim = OBS_DIM + (GAIT_OBS_DIM if self.gait_conditioned else 0)
         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
@@ -351,6 +464,8 @@ class Go2MujocoEnv(gym.Env):
         reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
         r_reach = REACH_WEIGHT * float(np.exp(-(reach_dist ** 2) / (REACH_SIGMA ** 2)))
         r_reach_dense = REACH_DENSE_WEIGHT * max(0.0, 1.0 - reach_dist / REACH_DENSE_NORM)
+        r_reach_mid = (REACH_MID_WEIGHT
+                       if REACH_SUCCESS_DIST <= reach_dist < REACH_MID_RADIUS else 0.0)
         r_reach_bonus = REACH_SUCCESS_BONUS if reach_dist < REACH_SUCCESS_DIST else 0.0
 
         # Explicit stall penalty: standing still while a real command is
@@ -362,13 +477,17 @@ class Go2MujocoEnv(gym.Env):
         r_stall = -0.6 if (cmd_speed > 0.15 and actual_speed < 0.3 * cmd_speed) else 0.0
 
         r_air, r_slip = self._air_time_and_slip(contacts)
+        r_col = -COLLISION_WEIGHT * float(self._nonfoot_collision_count())
+        r_lim = -SOFT_LIMIT_WEIGHT * self._soft_dof_limit_penalty()
 
         components = dict(
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
             stall=r_stall, alive=ALIVE_BONUS,
-            reach=r_reach, reach_dense=r_reach_dense, reach_bonus=r_reach_bonus,
+            reach=r_reach, reach_dense=r_reach_dense, reach_mid=r_reach_mid,
+            reach_bonus=r_reach_bonus,
             air_time=r_air, slip=r_slip,
+            collision=r_col, soft_limit=r_lim,
         )
 
         if self.gait_conditioned:
@@ -376,6 +495,11 @@ class Go2MujocoEnv(gym.Env):
             # contacts are already in [0,1]; desired_contact is soft [0,1].
             match = 1.0 - np.abs(contacts - self._desired_contact)
             components["gait_contact"] = GAIT_CONTACT_WEIGHT * float(np.mean(match))
+            # Diagonal pair symmetry (FL↔RR, FR↔RL) — LocoTouch idea, no tactile.
+            diag = 0.5 * (
+                1.0 - abs(float(contacts[0] - contacts[3]))
+                + 1.0 - abs(float(contacts[1] - contacts[2])))
+            components["gait_symmetry"] = GAIT_SYMMETRY_WEIGHT * float(diag)
 
         return float(sum(components.values())), components
 
@@ -386,31 +510,111 @@ class Go2MujocoEnv(gym.Env):
         wz = float(self.np_random.uniform(-0.5, 0.5)) * self.curriculum_level
         return np.array([vx, vy, wz], dtype=np.float32)
 
-    def _sample_reach_target(self) -> np.ndarray:
-        """Sample a reach target around ARM_MOUNT_POS, in the base body
-        frame. Radius range widens with curriculum_level (same level that
-        drives _sample_cmd's walking speed), so training starts with the
-        arm holding a near, easy point while standing close to still, and
-        only asks for farther reaches once the body is also walking faster
-        -- "standing and reaching" progressing to "reaching while walking",
+    def _best_ik_candidate(self, offset: np.ndarray):
+        """Best wrist_pitch candidate (base/shoulder/elbow/wrist1/wrist2)
+        placing the fingertip at ARM_MOUNT_POS + offset, ranked collision-
+        free first then by joint-limit margin, plus whether any candidate
+        was collision-free at all.
+
+        arm_ik.py solves pure arm-chain geometry with no awareness of the
+        rest of the robot -- some wrist_pitch solutions swing the arm back
+        into the legs/torso, and the resulting contact forces then stop the
+        PD controller from ever reaching that commanded angle (observed:
+        settled fingertip off by >0.5m despite an exact, joint-limit-legal
+        IK solution). Must be called with self.data already posed at this
+        episode's actual reset stance (legs, base height/orientation) --
+        the collision probe checks candidates against the real body
+        configuration, not whatever pose the previous episode ended in.
+        Temporarily overwrites the arm qpos slice per candidate; caller is
+        responsible for restoring it (and re-running mj_forward) once done.
+        """
+        best, best_score, found_collision_free = None, None, False
+        for wrist_pitch in _WRIST_PITCH_SWEEP:
+            pose = inverse_kinematics(
+                float(offset[0]), float(offset[1]), float(offset[2]),
+                wrist_pitch=wrist_pitch)
+            if pose is None:
+                continue
+            candidate = np.array(pose.as_list(), dtype=np.float32)
+            self.data.qpos[19:24] = candidate
+            mujoco.mj_forward(self.model, self.data)
+            collision_free = self._arm_placement_collision_count() == 0
+            found_collision_free = found_collision_free or collision_free
+            margin = min(JOINT_LIMIT - abs(a) for a in candidate)
+            score = (collision_free, margin)
+            if best_score is None or score > best_score:
+                best, best_score = candidate, score
+        return best, found_collision_free
+
+    def _sample_target_and_baseline(self):
+        """Sample a reach target (around ARM_MOUNT_POS, in the base body
+        frame) together with its IK baseline, rejecting candidates that
+        are only reachable via a self-colliding arm pose -- otherwise a
+        fraction of episodes would get an impossible target no policy
+        could ever satisfy, silently reintroducing the zero-gradient
+        problem the IK baseline is meant to fix (see _best_ik_candidate).
+        Radius range widens with curriculum_level (same level that drives
+        _sample_cmd's walking speed), so training starts with the arm
+        holding a near, easy point while standing close to still, and only
+        asks for farther reaches once the body is also walking faster --
+        "standing and reaching" progressing to "reaching while walking",
         both gated by the one curriculum_level rather than two independent
         schedules that could drift out of sync.
+
+        Must run after self.data is posed at this episode's actual reset
+        stance (see reset()), since the collision probe needs the real
+        leg/base configuration. Leaves self.data's arm qpos restored to
+        its pre-call value (the episode still starts stowed).
         """
         max_radius = REACH_MAX_RADIUS_EASY + (
             REACH_MAX_RADIUS_HARD - REACH_MAX_RADIUS_EASY) * self.curriculum_level
-        radius = float(self.np_random.uniform(REACH_MIN_RADIUS, max_radius))
-        # yaw within base_joint's own +/-90deg limit (arm.urdf.xacro), with
-        # margin so the shoulder/elbow aren't also pinned at their limits
-        # trying to hit the same point; elevation modestly above/below the
-        # mount plane.
-        yaw = float(self.np_random.uniform(-1.1, 1.1))
-        pitch = float(self.np_random.uniform(-0.5, 0.6))
-        direction = np.array([
-            np.cos(pitch) * np.cos(yaw),
-            np.cos(pitch) * np.sin(yaw),
-            np.sin(pitch),
-        ], dtype=np.float32)
-        return ARM_MOUNT_POS + radius * direction
+        saved_arm_qpos = self.data.qpos[19:24].copy()
+        baseline, offset = None, None
+        for _ in range(20):
+            radius = float(self.np_random.uniform(REACH_MIN_RADIUS, max_radius))
+            # yaw within base_joint's own +/-90deg limit (arm.urdf.xacro), with
+            # margin so the shoulder/elbow aren't also pinned at their limits
+            # trying to hit the same point; elevation modestly above/below the
+            # mount plane.
+            yaw = float(self.np_random.uniform(-1.1, 1.1))
+            pitch = float(self.np_random.uniform(-0.5, 0.6))
+            direction = np.array([
+                np.cos(pitch) * np.cos(yaw),
+                np.cos(pitch) * np.sin(yaw),
+                np.sin(pitch),
+            ], dtype=np.float32)
+            candidate_offset = radius * direction
+            candidate_baseline, collision_free = self._best_ik_candidate(candidate_offset)
+            if collision_free:
+                baseline, offset = candidate_baseline, candidate_offset
+                break
+        self.data.qpos[19:24] = saved_arm_qpos
+        mujoco.mj_forward(self.model, self.data)
+        if baseline is None:
+            # Exhausted retries (rare -- most of the sampled cone has a
+            # collision-free solution). Straight ahead at the min radius
+            # is always solvable and collision-free (points away from the
+            # body, not back into it).
+            offset = np.array([REACH_MIN_RADIUS, 0.0, 0.0], dtype=np.float32)
+            baseline = np.array(ARM_STOW[:5], dtype=np.float32)
+        return ARM_MOUNT_POS + offset, baseline
+
+    def _compute_arm_ik_baseline(self) -> np.ndarray:
+        """IK baseline for a reach_target set externally (e.g. play_policy.py
+        passing a fixed target), rather than sampled by this env. Since the
+        target wasn't vetted by _sample_target_and_baseline's rejection
+        loop, falls back to the stow pose if every candidate collides or is
+        unreachable -- callers setting reach_target directly are on their
+        own for picking something sane.
+        """
+        saved_arm_qpos = self.data.qpos[19:24].copy()
+        offset = self.reach_target - ARM_MOUNT_POS
+        best, _ = self._best_ik_candidate(offset)
+        self.data.qpos[19:24] = saved_arm_qpos
+        mujoco.mj_forward(self.model, self.data)
+        if best is None:
+            return np.array(ARM_STOW[:5], dtype=np.float32)
+        return best
 
     def _apply_domain_rand(self) -> None:
         if not self.randomize_domain:
@@ -423,6 +627,76 @@ class Go2MujocoEnv(gym.Env):
         kp_scale = float(rng.uniform(0.85, 1.15))
         self.model.actuator_gainprm[:, 0] = self._base_gainprm * kp_scale
         self.model.actuator_biasprm[:, 1] = self._base_biasprm1 * kp_scale
+
+    def _maybe_push(self) -> None:
+        """Impulse on base xy velocity mid-episode (simulates bumps / trips)."""
+        self._last_push[:] = 0.0
+        if not (self.push_robots and self.randomize_domain):
+            return
+        self._steps_since_push += 1
+        if self._steps_since_push * CTRL_DT < PUSH_INTERVAL_S:
+            return
+        self._steps_since_push = 0
+        # Scale push strength up with curriculum so early training stays calm.
+        vmax = PUSH_VEL_XY * (0.35 + 0.65 * self.curriculum_level)
+        dx = float(self.np_random.uniform(-vmax, vmax))
+        dy = float(self.np_random.uniform(-vmax, vmax))
+        self.data.qvel[0] += dx
+        self.data.qvel[1] += dy
+        self._last_push[:] = (dx, dy)
+
+    def _nonfoot_collision_count(self) -> int:
+        """Contacts involving non-foot geoms (thigh/calf/base vs floor or self)."""
+        n = 0
+        floor = int(self._floor_geom_id)
+        feet = self._foot_geom_ids
+        for i in range(self.data.ncon):
+            g1 = int(self.data.contact[i].geom1)
+            g2 = int(self.data.contact[i].geom2)
+            if g1 == floor or g2 == floor:
+                other = g2 if g1 == floor else g1
+                if other not in feet:
+                    n += 1
+            elif g1 not in feet and g2 not in feet:
+                n += 1
+        return n
+
+    def _arm_placement_collision_count(self) -> int:
+        """Like _nonfoot_collision_count, but ignores the gripper fingers'
+        own mutual contact -- they're mechanically closed in ARM_STOW and
+        most candidate poses, which is a normal closed-gripper self-contact,
+        not a sign the arm placement itself collides with the leg/torso.
+        Used by _best_ik_candidate; _compute_reward's collision penalty
+        intentionally keeps using _nonfoot_collision_count as-is."""
+        n = 0
+        floor = int(self._floor_geom_id)
+        feet = self._foot_geom_ids
+        fingers = self._finger_geom_ids
+        for i in range(self.data.ncon):
+            g1 = int(self.data.contact[i].geom1)
+            g2 = int(self.data.contact[i].geom2)
+            if g1 in fingers and g2 in fingers:
+                continue
+            if g1 == floor or g2 == floor:
+                other = g2 if g1 == floor else g1
+                if other not in feet:
+                    n += 1
+            elif g1 not in feet and g2 not in feet:
+                n += 1
+        return n
+
+    def _soft_dof_limit_penalty(self) -> float:
+        """Penalize hinge joints within SOFT_LIMIT_MARGIN of hard range."""
+        pen = 0.0
+        m = SOFT_LIMIT_MARGIN
+        q = self.data.qpos
+        for adr, (lo, hi) in zip(self._hinge_qposadr, self._hinge_range):
+            v = float(q[adr])
+            if v < lo + m:
+                pen += (lo + m - v) / m
+            elif v > hi - m:
+                pen += (v - (hi - m)) / m
+        return pen
 
     def _is_terminated(self) -> bool:
         z = float(self.data.qpos[2])
@@ -448,9 +722,12 @@ class Go2MujocoEnv(gym.Env):
                 self.curriculum_level + (0.005 if success else -0.002),
                 0.0, MAX_CURRICULUM_LEVEL))
             self.cmd = self._sample_cmd()
-            self.reach_target = self._sample_reach_target()
             if self.gait_conditioned:
                 self.gait_cmd = self._sample_gait_cmd()
+            # reach_target is sampled below, after the body is posed at its
+            # reset stance -- the collision-aware search needs the real
+            # leg/base configuration, not whatever pose the previous
+            # episode ended in (see _sample_target_and_baseline).
 
         mujoco.mj_resetData(self.model, self.data)
         self._apply_domain_rand()
@@ -466,8 +743,15 @@ class Go2MujocoEnv(gym.Env):
         self.data.ctrl[:]   = self._act_default
         mujoco.mj_forward(self.model, self.data)
 
+        if self.use_curriculum:
+            self.reach_target, self._arm_ik_baseline = self._sample_target_and_baseline()
+        else:
+            self._arm_ik_baseline = self._compute_arm_ik_baseline()
+
         self._prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._step_count = 0
+        self._steps_since_push = 0
+        self._last_push[:] = 0.0
         self._last_episode_steps = 0
         self._gait_index = 0.0
         self._feet_air_time[:] = 0.0
@@ -477,10 +761,14 @@ class Go2MujocoEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
-        self.data.ctrl[:] = self._act_default + action * ACT_SCALE
+        ctrl = self._act_default + action * ACT_SCALE
+        ctrl[ARM_ACT_SLICE] = (
+            self._arm_ik_baseline + action[ARM_ACT_SLICE] * ARM_RESIDUAL_SCALE)
+        self.data.ctrl[:] = ctrl
         for _ in range(CTRL_DECIMATION):
             mujoco.mj_step(self.model, self.data)
 
+        self._maybe_push()
         self._step_gait()
         reward, components = self._compute_reward(action)
         self._prev_action = action.copy()
@@ -498,7 +786,18 @@ class Go2MujocoEnv(gym.Env):
         if self.render_mode == "human":
             self.render()
 
-        return obs, reward, terminated, truncated, {"reward_components": components}
+        # Privileged extras for logging / future asymmetric critic (DreamWaQ-lite).
+        # Actor obs stays proprio-only deployable; true lin_vel is training-only.
+        lin_vel = self.data.sensor("lin_vel").data.astype(np.float32)
+        info = {
+            "reward_components": components,
+            "privileged": {
+                "lin_vel": lin_vel.copy(),
+                "base_height": float(self.data.qpos[2]),
+                "push_xy": self._last_push.copy(),
+            },
+        }
+        return obs, reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode == "human":

@@ -28,6 +28,8 @@ from stable_baselines3.common.utils import get_schedule_fn
 
 from envs.go2_mujoco_env import Go2MujocoEnv
 from envs.obs_history import ObsHistoryWrapper
+from envs.privileged_obs_wrapper import PrivilegedObsWrapper
+from policies.asymmetric_mlp import AsymmetricActorCriticPolicy
 
 LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs", "mujoco")
 CKPT_DIR = os.path.join(LOG_DIR, "checkpoints")
@@ -93,14 +95,17 @@ class VecNormSaveCallback(BaseCallback):
 # --------------------------------------------------------------------------- #
 
 def make_env(cmd, rank, seed=0, curriculum_level=0.0, gait_conditioned=False,
-             obs_history=1):
+             obs_history=1, asymmetric=False, push_robots=True):
     def _init():
         env = Go2MujocoEnv(cmd=cmd, render_mode=None,
                            randomize_domain=True, use_curriculum=True,
                            initial_curriculum_level=curriculum_level,
-                           gait_conditioned=gait_conditioned)
+                           gait_conditioned=gait_conditioned,
+                           push_robots=push_robots)
         if obs_history > 1:
             env = ObsHistoryWrapper(env, history_len=obs_history)
+        if asymmetric:
+            env = PrivilegedObsWrapper(env)
         env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
@@ -136,6 +141,13 @@ def main():
     parser.add_argument("--obs-history", type=int, default=1, metavar="N",
                         help="stack the last N proprio frames into the observation "
                              "(1 = disabled, recommended 5 for blind terrain inference)")
+    parser.add_argument("--asymmetric", action="store_true",
+                        help="DreamWaQ-lite: critic sees true lin_vel, actor proprio-only")
+    parser.add_argument("--no-push", action="store_true",
+                        help="disable mid-episode push-robot domain randomization -- "
+                             "useful when resuming a checkpoint trained before pushes "
+                             "were added, since the abrupt new disturbance + stale "
+                             "VecNormalize reward stats can destabilize the resumed policy")
     parser.add_argument("--log-dir", type=str, default=None,
                         help="override training log directory")
     args = parser.parse_args()
@@ -147,6 +159,8 @@ def main():
             suffix_parts.append("gait")
         if args.obs_history > 1:
             suffix_parts.append(f"hist{args.obs_history}")
+        if args.asymmetric:
+            suffix_parts.append("asym")
         log_dir = LOG_DIR if not suffix_parts else (
             os.path.join(os.path.dirname(LOG_DIR), "mujoco_" + "_".join(suffix_parts)))
     ckpt_dir = os.path.join(log_dir, "checkpoints")
@@ -165,12 +179,14 @@ def main():
 
     print(f"Training Go2 (MuJoCo) | cmd={cmd} | envs={args.n_envs} | steps={args.timesteps} "
           f"| curriculum_level={args.curriculum_level:.3f} "
-          f"| gait={args.gait} | obs_history={args.obs_history} | log={log_dir}")
+          f"| gait={args.gait} | obs_history={args.obs_history} "
+          f"| asymmetric={args.asymmetric} | log={log_dir}")
 
     # ---- training envs with obs + reward normalisation ----
     vec_env = DummyVecEnv([
         make_env(cmd, i, curriculum_level=args.curriculum_level,
-                 gait_conditioned=args.gait, obs_history=args.obs_history)
+                 gait_conditioned=args.gait, obs_history=args.obs_history,
+                 asymmetric=args.asymmetric, push_robots=not args.no_push)
         for i in range(args.n_envs)])
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
                            clip_obs=10.0, clip_reward=10.0)
@@ -179,9 +195,11 @@ def main():
     def _make_eval():
         e = Go2MujocoEnv(cmd=cmd, render_mode=None,
                          randomize_domain=False, use_curriculum=False,
-                         gait_conditioned=args.gait)
+                         gait_conditioned=args.gait, push_robots=not args.no_push)
         if args.obs_history > 1:
             e = ObsHistoryWrapper(e, history_len=args.obs_history)
+        if args.asymmetric:
+            e = PrivilegedObsWrapper(e)
         return Monitor(e)
 
     eval_env = VecNormalize(DummyVecEnv([_make_eval]),
@@ -256,8 +274,9 @@ def main():
         model.target_kl = 0.03
         print(f"Resumed from {args.resume}")
     else:
+        policy_cls = AsymmetricActorCriticPolicy if args.asymmetric else "MlpPolicy"
         model = PPO(
-            "MlpPolicy",
+            policy_cls,
             vec_env,
             learning_rate=3e-4,
             n_steps=2048,

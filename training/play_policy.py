@@ -42,10 +42,11 @@ from envs.go2_mujoco_env import Go2MujocoEnv, SIM_DT, CTRL_DECIMATION
 from envs.go2_mujoco_stairs_env import Go2MujocoStairsEnv
 from envs.go2_mujoco_vision_env import Go2MujocoVisionEnv
 from envs.obs_history import ObsHistoryWrapper
+from envs.privileged_obs_wrapper import PrivilegedObsWrapper
 
 
 def _make_env(scene: str, cmd, use_vision: bool, gait_conditioned=False,
-              gait_name="trotting", obs_history=1):
+              gait_name="trotting", obs_history=1, asymmetric=False):
     kwargs = dict(
         cmd=cmd, render_mode=None, randomize_domain=False,
         use_curriculum=False, gait_conditioned=gait_conditioned,
@@ -59,6 +60,8 @@ def _make_env(scene: str, cmd, use_vision: bool, gait_conditioned=False,
         env = Go2MujocoEnv(**kwargs)
     if obs_history > 1:
         env = ObsHistoryWrapper(env, history_len=obs_history)
+    if asymmetric:
+        env = PrivilegedObsWrapper(env)
     return env
 
 
@@ -167,6 +170,8 @@ def main():
                         choices=["trotting", "bounding", "pacing", "pronking"])
     parser.add_argument("--obs-history", type=int, default=1, metavar="N",
                         help="must match the history length used at train time")
+    parser.add_argument("--asymmetric", action="store_true",
+                        help="wrap with PrivilegedObsWrapper (DreamWaQ-lite checkpoints)")
     parser.add_argument(
         "--no-display", action="store_true",
         help="Headless: no OpenCV window (use with --episodes and/or --record)",
@@ -194,7 +199,7 @@ def main():
     use_vision = not args.blind
     raw = _make_env(args.scene, cmd, use_vision=use_vision,
                     gait_conditioned=args.gait, gait_name=args.gait_name,
-                    obs_history=args.obs_history)
+                    obs_history=args.obs_history, asymmetric=args.asymmetric)
     env = DummyVecEnv([lambda: Monitor(raw)])
 
     # auto-detect vecnorm stats next to the checkpoint
@@ -219,7 +224,8 @@ def main():
     model = PPO.load(args.model, env=env)
     print(f"Model: {args.model}")
     print(f"scene={args.scene}  vision={use_vision and args.scene != 'flat'}  "
-          f"gait={args.gait}  obs_history={args.obs_history}  cmd={cmd}")
+          f"gait={args.gait}  obs_history={args.obs_history}  "
+          f"asymmetric={args.asymmetric}  cmd={cmd}")
 
     # Unwrap to the MuJoCo env for sensors / renderer.
     core = raw
@@ -278,7 +284,7 @@ def main():
                 if key == ord('r'):
                     obs = env.reset()
                     step = 0; ep_reward = 0.0; episode += 1
-            elif writer is None and step > args.max_steps:
+            elif args.no_display and step > args.max_steps:
                 break
 
         if done[0]:
