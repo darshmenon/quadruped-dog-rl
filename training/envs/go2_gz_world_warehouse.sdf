@@ -1,0 +1,107 @@
+<?xml version="1.0" ?>
+<!-- Self-contained warehouse aisles (Fuel industrial-warehouse inspired,
+     no Fuel URI deps). World name go2_rl for existing Go2 launch bridges.
+     Launch:
+       ros2 launch launch/champ_go2_gazebo.launch.py \\
+         world:=$(pwd)/training/envs/go2_gz_world_warehouse.sdf
+     Full Fuel warehouse (meshes): gz sim training/envs/worlds/fuel/industrial_warehouse.sdf
+-->
+<sdf version="1.8">
+  <world name="go2_rl">
+    <physics name="1ms" type="ode">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.55 0.55 0.58 1</ambient>
+      <background>0.65 0.65 0.7 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.85 0.85 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry>
+          <surface><friction><ode><mu>1</mu><mu2>1</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry>
+          <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Outer shell -->
+    <model name="wh_wall_n"><static>true</static><pose>0 8 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>20 0.25 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>20 0.25 3</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link></model>
+    <model name="wh_wall_s"><static>true</static><pose>0 -8 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>20 0.25 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>20 0.25 3</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link></model>
+    <model name="wh_wall_e"><static>true</static><pose>10 0 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.25 16 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.25 16 3</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link></model>
+    <model name="wh_wall_w"><static>true</static><pose>-10 0 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.25 16 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.25 16 3</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link></model>
+
+    <!-- Aisle shelves (rows along X, gaps for Go2) -->
+    <model name="shelf_a1"><static>true</static><pose>-4 4 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.75 0.55 0.25 1</ambient><diffuse>0.75 0.55 0.25 1</diffuse></material></visual></link></model>
+    <model name="shelf_a2"><static>true</static><pose>4 4 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.75 0.55 0.25 1</ambient><diffuse>0.75 0.55 0.25 1</diffuse></material></visual></link></model>
+    <model name="shelf_b1"><static>true</static><pose>-4 0 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.7 0.5 0.2 1</ambient><diffuse>0.7 0.5 0.2 1</diffuse></material></visual></link></model>
+    <model name="shelf_b2"><static>true</static><pose>4 0 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.7 0.5 0.2 1</ambient><diffuse>0.7 0.5 0.2 1</diffuse></material></visual></link></model>
+    <model name="shelf_c1"><static>true</static><pose>-4 -4 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.75 0.55 0.25 1</ambient><diffuse>0.75 0.55 0.25 1</diffuse></material></visual></link></model>
+    <model name="shelf_c2"><static>true</static><pose>4 -4 1 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>8 0.6 2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>8 0.6 2</size></box></geometry>
+          <material><ambient>0.75 0.55 0.25 1</ambient><diffuse>0.75 0.55 0.25 1</diffuse></material></visual></link></model>
+
+    <!-- Pallet stacks in central corridor gaps -->
+    <model name="pallet_1"><static>true</static><pose>0 2 0.4 0 0 0.2</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1.0 0.8 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.0 0.8 0.8</size></box></geometry>
+          <material><ambient>0.3 0.45 0.7 1</ambient><diffuse>0.3 0.45 0.7 1</diffuse></material></visual></link></model>
+    <model name="pallet_2"><static>true</static><pose>0 -2.5 0.35 0 0 -0.3</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.9 0.7 0.7</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.9 0.7 0.7</size></box></geometry>
+          <material><ambient>0.35 0.5 0.35 1</ambient><diffuse>0.35 0.5 0.35 1</diffuse></material></visual></link></model>
+  </world>
+</sdf>

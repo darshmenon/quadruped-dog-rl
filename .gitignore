@@ -34,6 +34,9 @@ docs/images/generated/
 training/terrain/generated/
 training/envs/go2_unitree_terrain_generated.xml
 
+# Shallow clones of upstream world packs (re-fetch with scripts/download_worlds.py)
+training/envs/worlds/_src/
+
 # ROS2 build artifacts
 install/
 ros2/install/
