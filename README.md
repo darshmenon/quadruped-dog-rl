@@ -265,20 +265,7 @@ source ros2/install/setup.bash
 ros2 launch champ_teleop teleop.launch.py
 ```
 
-> **Note:** `champ_config` (`joints.yaml`, `links.yaml`, `gait.yaml`) is now
-> wired to Go2's real joint/link names (`FL_hip_joint`, `FL_thigh`, ...,
-> `nominal_height: 0.32`) and `gazebo.launch.py` points at
-> `urdf/go2_unitree/urdf/go2_gz.urdf.xacro` instead of the generic reference
-> robot. It still cannot be launched end-to-end in this repo: `champ_gazebo`
-> depends on Gazebo Classic (`gazebo_ros`, `gazebo_ros2_control`), which isn't
-> installed and is a different physics stack from this repo's Gazebo
-> Harmonic/gz-sim8 setup used everywhere else. Bridging CHAMP's gait engine
-> into the native gz-sim pipeline (like the Quad-SDK effort controller does)
-> instead of `champ_gazebo` would be the next step. The Go2's actual working
-> walking controller is the native gz-sim pipeline described under
-> [Gazebo backend](#gazebo-backend-gazebo-harmonic-ros2) below
-> (`training/launch/gazebo_rl.launch.py`), which uses real Go2 joint names and
-> `gz-sim JointPositionController` plugins instead of CHAMP.
+> **Note:** `champ_config` is wired to Go2's real joint/link names (`nominal_height: 0.32`, etc.) and `gazebo.launch.py` points at the Go2 xacro, but it still can't launch end-to-end here: `champ_gazebo` depends on Gazebo Classic (`gazebo_ros`), a different physics stack from this repo's Gazebo Harmonic/gz-sim8 setup. Bridging CHAMP's gait engine into native gz-sim (like Quad-SDK's effort controller does) would fix this. Go2's actual working walking controller is the native gz-sim pipeline under [Gazebo backend](#gazebo-backend-gazebo-harmonic-ros2) (`training/launch/gazebo_rl.launch.py`), using real Go2 joint names and `gz-sim JointPositionController`.
 
 ---
 
@@ -464,7 +451,7 @@ Output: `training/logs/vision_compare/{blind,sighted}/` (checkpoints, `evaluatio
 
 Status: the env and obstacle placement are smoke-tested (import, reset, N random steps, both `use_vision` settings, obstacles forced active at max curriculum) — not yet a full trained-and-evaluated comparison, so treat blind-vs-sighted reward numbers as unverified until a full run's `evaluations.npz` has been checked.
 
-> **Fixed bug (worth knowing if you see `ep_len_mean` stuck at 1):** `_terrain_height_under_base()`/`_height_scan()` ray-cast straight down from above the base to measure height above ground. The ray originally checked every geom, including the robot's own base box directly beneath the ray origin, so it hit itself instead of the terrain and reported the robot as already below the ground on every single reset — instant termination, every episode, regardless of policy. Fixed by putting the floor and obstacle geoms in MuJoCo geom group 1 and restricting the ray to that group (robot geoms stay in the default group 0), so it can no longer self-intersect.
+> **Fixed bug (worth knowing if you see `ep_len_mean` stuck at 1):** the down-cast rays used to hit the robot's own base geom instead of the terrain, causing instant below-ground termination every reset. Fixed by putting floor/obstacle geoms in MuJoCo geom group 1. Full writeup: [docs/CHANGELOG.md](docs/CHANGELOG.md#terrain-height-ray-self-intersection-visionrough-terrain-env).
 
 ### Fall recovery (MuJoCo, FR-Net-style)
 
@@ -565,23 +552,7 @@ The Gazebo launch starts paused, spawns the Go2, resets it upright, starts
 This avoids the robot falling onto its back before the joint controllers receive
 their first commands.
 
-> **Fixed, retrain needed:** forward walking via `/cmd_vel` previously
-> tripped the robot's own fall-detector instead of translating, even on
-> flat ground. Root cause: `Go2GazeboEnv`'s RL reward compared `ang_vel[0]`
-> (roll rate) against `cmd[0]` (the linear speed target) — a copy/paste bug
-> that never rewarded actual forward progress, since the env didn't
-> subscribe to `/odom` at all. The termination check also used the same
-> stale `> 0.5` tilt threshold (~120°) already fixed for the MuJoCo backend
-> but never ported here. Both are fixed in `training/envs/go2_gazebo_env.py`
-> — it now subscribes to `/odom` (published by `scripts/gz_pose_to_odom.py`,
-> already auto-launched) and uses real linear velocity in the reward, and
-> terminates at the same ~60° tilt as MuJoCo. `train_gazebo.py`'s
-> `EvalCallback` was also removed: it pointed at the same live env PPO was
-> training on rather than a separate instance, so its periodic eval
-> episodes reset/stepped the sim out from under the in-progress rollout
-> collection every 10k steps. No Gazebo-backend checkpoint has been trained
-> against these fixes yet — treat forward walking here as unverified until
-> a training run completes.
+> **Fixed, retrain needed:** forward walking via `/cmd_vel` used to trip the fall-detector instead of translating — the reward compared roll rate against the linear-speed command and never subscribed to `/odom`. Both fixed in `training/envs/go2_gazebo_env.py`. No checkpoint trained against the fix yet — treat forward walking here as unverified. Full writeup: [docs/CHANGELOG.md](docs/CHANGELOG.md#gazebo-rl-cmd_vel-reward-bug-native-gazebo-backend).
 
 #### Multi-terrain world
 
@@ -758,12 +729,7 @@ Robot URDF variants:
 
 ![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
 
-The Go2 also carries a second, 3D lidar (`urdf/go2_unitree/urdf/go2_gz.urdf.xacro`'s
-`lidar3d` sensor — 16-channel, VLP-16-style gpu_lidar, `/points` PointCloud2)
-alongside the 2D one used above. `launch/slam3d_go2.launch.py` builds on
-`launch/champ_go2_gazebo.launch.py` (Gazebo + CHAMP gait engine driving the
-Go2 from `/cmd_vel`) and adds RTAB-Map ICP lidar SLAM plus an optional
-frontier explorer that walks the robot around autonomously to grow the map:
+A second, 3D lidar (16-channel, VLP-16-style, `/points` PointCloud2) drives RTAB-Map ICP SLAM plus an optional frontier explorer that walks the robot around autonomously to grow the map. `launch/slam3d_go2.launch.py` builds on `launch/champ_go2_gazebo.launch.py` (Gazebo + CHAMP gait):
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -771,63 +737,27 @@ source ros2/install/setup.bash
 ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true
 ```
 
-Verified end-to-end in this environment: the 3D lidar's point cloud drives
-RTAB-Map to a real, growing occupancy grid (`/map`), and
-`scripts/frontier_explorer_go2.py` (no Nav2 costmap/planner exists for the
-Go2 yet, so this is a direct point-and-go controller, not a real planner)
-finds frontier cells on that grid and walks the robot toward them via
-`/cmd_vel` — confirmed by ~2.8m of net displacement from spawn and the map
-footprint growing (420x391 -> 477x422 cells) over a couple minutes in the
-outdoor demo world. One timing detail if you touch the explorer:
-`champ_joint_trajectory_to_go2_gz.py` treats `/cmd_vel` as stale after 0.35s
-and falls back to an idle-drift-reset that fights any slower command loop —
-the explorer's control loop runs at 10Hz for exactly that reason, only the
-(cheap, only-when-needed) frontier search itself is less frequent.
-
-Runs in an isolated `ROS_DOMAIN_ID` (default `157`) and `GZ_PARTITION`
-(default `quad3dslam`) so it doesn't cross-talk with other ROS2/Gazebo
-sessions on the same machine — override both via launch args if you want to
-share a domain with another terminal. FastDDS's default port math only
-allows domain IDs **0–232**; higher values die with
-`Calculated port number is too high`.
+Verified end-to-end: `scripts/frontier_explorer_go2.py` (a direct point-and-go controller, not a Nav2 planner — none exists for Go2 yet) grows a real occupancy grid and walks the robot toward frontier cells via `/cmd_vel`. Runs on an isolated `ROS_DOMAIN_ID` (default `157`) / `GZ_PARTITION` (default `quad3dslam`) so it doesn't cross-talk with other sessions — override both via launch args. FastDDS domain IDs are capped at **0–232**.
 
 ```bash
 ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
   ros_domain_id:=200 world:="$(pwd)/training/envs/go2_multi_terrain.sdf"
 ```
 
-For a closed indoor loop (two rooms + doorway — better for finishing a
-frontier map than the open outdoor worlds), use the room world. Optional
-`track_obstacles:=true` starts `scripts/obstacle_tracker_go2.py`, which
-clusters the 3D lidar cloud and Kalman-tracks nearby obstacles on
-`/obstacle_tracker/state` + `/obstacle_tracker/markers`:
+Use the room world for a closed indoor loop (easier to finish mapping than the open outdoor worlds). `track_obstacles:=true` adds `scripts/obstacle_tracker_go2.py` (clusters + Kalman-tracks the 3D lidar cloud on `/obstacle_tracker/state`/`markers`):
 
 ```bash
 ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true \
   track_obstacles:=true world:="$(pwd)/training/envs/go2_gz_world_room.sdf"
 ```
 
-**`locomotion:=nmpc`** swaps CHAMP out for Quad-SDK's NMPC backend instead
-(same lidar/RTAB-Map setup, a second `lidar3d` sensor on
-`ros2/quad_sdk/quad_simulator/go2_description/models/go2/go2.sdf.xacro`):
+**`locomotion:=nmpc`** swaps CHAMP for Quad-SDK's NMPC backend (same lidar/RTAB-Map setup) — verified end-to-end too, RTAB-Map builds a real occupancy grid off this backend's cloud as well:
 
 ```bash
 ros2 launch launch/slam3d_go2.launch.py locomotion:=nmpc headless:=true explore:=true
 ```
 
-Quad-SDK has no odom publisher at all (its state estimator is disabled by
-default) and no `odom->body` TF, so `scripts/quadsdk_ground_truth_to_odom.py`
-republishes its ground-truth robot state as both. The frontier explorer
-doesn't drive this backend directly — it publishes frontier goals to
-Quad-SDK's live `goal_state` topic (`geometry_msgs/PointStamped`,
-`global_body_planner.cpp`'s `goal_state_sub_`) and lets
-`global_body_planner`/`local_planner`/`nmpc_controller` do the walking
-(`control_mode:=nmpc_goal`, vs. `cmd_vel` for the CHAMP backend). Verified
-end-to-end: RTAB-Map builds a real occupancy grid off this backend's cloud
-too (351x422 cells and growing, zero conversion errors) once a
-`static_transform_publisher` bridges the sensor's gz-derived frame name
-(`robot_1/body/lidar3d` — plain SDF has no `<gz_frame_id>`-style override,
-unlike the URDF path) to `body`.
+Quad-SDK has no odom publisher or `odom->body` TF by default, so `scripts/quadsdk_ground_truth_to_odom.py` republishes ground-truth state as both, and the frontier explorer drives it by publishing goals to Quad-SDK's `goal_state` topic instead of `/cmd_vel`.
 
 ### Isaac Gym backend (requires NVIDIA Isaac Gym)
 
@@ -884,7 +814,7 @@ VecNormalize stats are auto-detected from the checkpoint directory.
 
 > **Status:** the old stall-reward bug here (policy collecting near-max reward by standing still) has been fixed in the reward code, but the saved SB3 checkpoints still need more training/selection. In quick headless checks, `go2_mujoco_final.zip` falls early and `best_model.zip` is sensitive to the matching VecNormalize stats. Treat the current checkpoints as starting points for fine-tuning, not final walking policies.
 >
-> **Known issue (root cause found, fix untrained):** the `reach` reward component never actually trained the arm at all, at any curriculum level. `REACH_SIGMA=0.12`'s `exp(-(d/sigma)^2)` kernel underflows to ~0 anywhere past ~0.3m, but the stow pose starts the fingertip ~0.5-0.7m from a freshly sampled target — outside the kernel's support from step one. Checking `reward_components` on `best_model.zip` confirms `reach` sits at ~1e-8 for the entire episode: the eval reward peak of 462.97±4.57 at curriculum_level≈0.85 was pure locomotion, the arm never moved toward its target, and the later collapse to ~140 by 2.8M steps was the walk+reach curriculum (capped at `MAX_CURRICULUM_LEVEL=0.85`, see the constant's comment) still pushing command speed harder than the policy could hold — unrelated to the arm, which was never contributing reward to begin with. Fix applied: `REACH_DENSE_WEIGHT * max(0, 1 - reach_dist/REACH_DENSE_NORM)`, a linear term with a real gradient across the actual starting-distance range, added alongside the sigma kernel (which still handles fine-precision near the goal). Not yet trained against — `best_model.zip` predates this change, so its arm behavior should not be trusted as representative of the reach task at all.
+> **Known issue (root cause found, fix untrained):** the `reach` reward never trained the arm — its kernel underflows to ~0 well before the stow pose's starting distance, so `reach≈1e-8` for the whole episode and the eval reward peak was pure locomotion. Fix (a linear dense-reward term) is applied but not yet trained against — `best_model.zip` predates it, so don't trust its arm behavior. Full writeup: [docs/CHANGELOG.md](docs/CHANGELOG.md#reach-reward-never-trained-the-arm-mujoco-walkarm-reach).
 
 ```bash
 # Headless check, exits with PASS/FAIL
@@ -1118,13 +1048,15 @@ python3 intelligence/navigation/waypoint_navigator.py \
 
 What's actually worth doing next, in priority order:
 
-1. ~~Fix the `global_body_planner_node` segfault on hard terrain.~~ **Fixed.** Crashed on `gap_80cm.sdf`, `slope_20_hole.sdf`, `rough_40cm_huge.sdf`, `parkour_local_min.sdf`, and all `*_local_min.sdf` worlds (see [terrain test results](docs/quadsdk_notes.md#terrain-test-results)). Root cause: `GBPL::postProcessPath` (`ros2/quad_sdk/global_body_planner/src/gbpl.cpp`) pops a state vector and an action vector together in lockstep, but the state vector always has one more element than the action vector (N states, N-1 edges) — when the direct-connect shortcut kept failing all the way to the second state (exactly what happens with no easy flat path near the goal), it read `.back()` off the now-empty action vector. Fixed by guarding that read; verified the package rebuilds clean.
-2. ~~Retrain the MuJoCo RL policy against its reward-hack fix.~~ **Retrained and partially verified.** The stall-penalty fix works: commanding `vx=0.5` on the retrained policy (`go2_mujoco_final.zip`, 2M steps) now produces an actual mean `vx≈0.35 m/s` over 10 eval episodes, versus the old checkpoint's `vx≈0.01` (standing still). But this surfaced a new problem — eval episodes now end after ~90 of a possible 1000 steps (`training/logs/mujoco/evaluations.npz`), consistent from step 900k through 2M, so the policy is falling roughly 1.5-2s into every walk instead of sustaining it for the full 20s episode. Reward-hack is fixed; gait stability now needs work (likely more training, a fall/recovery-shaping reward term, or a slower-speed curriculum).
-3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Root-caused and fixed, untested in sim.** `leg_phases` was initialized from `Gait.STAND`'s `phase_offsets` (`[0,0,0,0]`) and then advanced every tick by the *same* scalar increment applied to all four elements — so all four legs stayed perfectly in phase forever, and every non-STAND gait's `phase_offsets` (e.g. WALK's `[0, 0.5, 0.25, 0.75]`) were computed but never actually applied per leg. All four feet swung simultaneously during the non-duty fraction of each cycle, dropping the body with zero ground support and tripping `stand_go2_gz.py`'s fall-detector. Fixed in `scripts/stand_go2_gz.py`, `scripts/teleop_go2_gz.py`, `scripts/cmd_vel_go2_gz.py`, and `training/headless_control.py` (all four had the same duplicated bug): now a scalar cycle phase advances each tick, and the active gait's `phase_offsets` are added back in per leg before computing foot targets. Verified via a standalone phase-accumulation check that legs now stagger correctly for WALK — not yet verified against a live Gazebo run.
-4. ~~Evaluate the new multi-terrain RL pipeline.~~ **Evaluated — no meaningful blind/sighted gap found.** Both `train_vision_compare.py` runs (200k steps each) finished; regenerated `blind_vs_sighted.png` from their `evaluations.npz`. Final eval mean reward: blind `305.7`, sighted `307.8` — within noise of each other, so the height-scan observation isn't yet producing the expected rough-terrain advantage. Worth a longer run or a harder terrain curriculum before drawing conclusions either way.
-5. **Wire the [manipulator arm](#manipulator-arm) into something that does work.** It's mounted and visually verified but purely decorative right now — no RL task, no IK, no quad_sdk/CHAMP awareness of the extra mass and links.
+1. ~~Fix the `global_body_planner_node` segfault on hard terrain.~~ **Fixed** — a state/action vector length mismatch in `GBPL::postProcessPath`. [Details](docs/CHANGELOG.md#global_body_planner_node-segfault-on-hard-terrain--fixed).
+2. ~~Retrain the MuJoCo RL policy against its reward-hack fix.~~ **Retrained, partially verified** — real forward velocity now, but episodes still end early (~1.5-2s falls). [Details](docs/CHANGELOG.md#mujoco-rl-policy-retrained-against-reward-hack-fix--retrained-partially-verified).
+3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Root-caused and fixed, untested in sim** — all four legs shared one gait phase instead of per-leg offsets. [Details](docs/CHANGELOG.md#cmd_vel-walking-on-the-native-gazebo-backend-ik-gait--root-caused-and-fixed-untested-in-sim).
+4. ~~Evaluate the new multi-terrain RL pipeline.~~ **Evaluated — no meaningful blind/sighted gap found** (305.7 vs. 307.8 reward). [Details](docs/CHANGELOG.md#multi-terrain-rl-pipeline-evaluation--evaluated-no-meaningful-blindsighted-gap-found).
+5. **Wire the [manipulator arm](#manipulator-arm) into something that does work.** Mounted and visually verified, but purely decorative — no RL task, IK, or quad_sdk/CHAMP awareness of the extra mass.
 5b. ~~Fall-recovery MuJoCo env (FR-Net-style).~~ **Added** (`train_recovery.py` / `play_recovery.py`) — needs a full train + upright-rate eval before composing with the walk policy.
-6. ~~Wire the arm into the MuJoCo RL policy; fix the native-Gazebo RL reward.~~ **Arm wired into MuJoCo RL (19-DOF, 76-dim obs, walk+reach reward); Gazebo RL reward bug fixed; both need more training/verification.** `go2_mujoco_env.py` now trains a combined walk+arm-reach policy — this is a separate objective from item 5's IK-based arm, and unrelated to item 3's IK-trot gait-phase fix. Along the way: (a) `train_mujoco.py` only wrote `curriculum_level.txt` at clean exit, so an interrupted run (crash/OOM/preemption) would resume with a stale curriculum against an already-advanced checkpoint — now saved every 50k steps alongside the VecNormalize checkpoint; (b) `PPO()` had no `target_kl`, and training logs showed `approx_kl` climbing 0.017→0.10 and `clip_fraction` 0.2→0.6 unbounded over 3M steps while eval reward collapsed from a peak of 458 to ~120 and never recovered — `target_kl=0.03` (fresh and resumed runs) softened but didn't fully fix this, see the "Known issue" under [Play Trained Policy](#play-trained-policy-opencv-viewer) — that section now also covers a separate, deeper bug found in the `reach` reward term itself; (c) separately, `Go2GazeboEnv`'s RL reward compared angular roll-rate against the linear-speed command (never rewarded actual translation) and reused the pre-fix `>0.5` tilt threshold — both fixed, see the Gazebo backend section above; (d) `train_gazebo.py`'s `EvalCallback` was evaluating on the exact same live env instance PPO trained on, corrupting in-progress rollouts every 10k steps — removed, no substitute eval env exists yet since Gazebo isn't cheaply parallelizable like MuJoCo. No Gazebo-backend RL checkpoint has been trained against these fixes yet.
+6. ~~Wire the arm into the MuJoCo RL policy; fix the native-Gazebo RL reward.~~ **Both done, need more training/verification** — 19-DOF walk+arm-reach policy, plus curriculum-checkpointing, `target_kl`, and Gazebo reward fixes along the way. [Details](docs/CHANGELOG.md#arm-wired-into-mujoco-rl-policy-native-gazebo-rl-reward-fixed).
+
+Full postmortems for every fixed item: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 ## Additional Docs
 
@@ -1137,6 +1069,7 @@ What's actually worth doing next, in priority order:
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | SLAM, obstacle tracking, Gazebo RL, RViz checks |
 | [PROJECT_GROWTH_PLAN.md](docs/PROJECT_GROWTH_PLAN.md) | Feature and structure checklist |
 | [quadsdk_notes.md](docs/quadsdk_notes.md) | Quad-SDK terrain test notes |
+| [CHANGELOG.md](docs/CHANGELOG.md) | Full bug postmortems / root-cause writeups |
 | [training/terrain/README.md](training/terrain/README.md) | Stair/ledge generators + Unitree terrain_tool |
 
 ### Demo media (`docs/images/`)
