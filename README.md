@@ -18,10 +18,6 @@ A ROS2 + Gazebo + MuJoCo workspace for simulating and walking quadruped robots, 
 **Go2 is the only fully working robot** (real URDF/meshes, both locomotion backends). The other `urdf/*_config/` folders are CHAMP config stubs carried over from upstream examples — they reference external ROS1 `*_description` packages that aren't vendored here, so they don't spawn as-is.
 
 ![Go2 walking under Quad-SDK NMPC control](docs/images/go2_walking.gif)
-![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
-![Go2 2D SLAM map of a room in RViz](docs/images/go2_slam_2d_room.png)
-![Go2 RL policy in MuJoCo viewer](docs/images/go2_policy.png)
-![Go2 with manipulator arm](docs/images/go2_manipulator_arm.png)
 
 ---
 
@@ -162,6 +158,8 @@ pip install -r requirements.txt
 ```
 Use the matching `vecnorm_<steps>_steps.pkl` when resuming — stale normalization stats can make a good checkpoint look broken. Output: `training/logs/mujoco/`. View curves: `tensorboard --logdir training/logs/mujoco`.
 
+![Go2 RL policy in MuJoCo viewer](docs/images/go2_policy.png)
+
 ![SB3 eval reward curves per task](docs/images/eval_comparison.png)
 
 Regenerate after any new run: `python3 scripts/plot_eval_comparison.py`. Notable: `flat walk (gated reward)` climbs to ~2300 by 3.6M steps then collapses — a reach-reward exploit, see [CHANGELOG](docs/CHANGELOG.md).
@@ -276,11 +274,15 @@ python3 scripts/gz_pose_to_odom.py     # bridges Gazebo pose -> /odom + TF
 ros2 launch launch/slam_go2.launch.py  # subscribes /scan, publishes /map
 ```
 
+![SLAM Toolbox map + LiDAR scan of a room in RViz](docs/images/go2_slam_2d_room.png)
+
 **3D LiDAR SLAM + frontier exploration (RTAB-Map):**
 ```bash
 ros2 launch launch/slam3d_go2.launch.py headless:=true explore:=true
 ```
 `scripts/frontier_explorer_go2.py` grows a real occupancy grid and walks the robot toward frontier cells. `track_obstacles:=true` adds Kalman-tracked obstacle clustering. `locomotion:=nmpc` swaps CHAMP for the Quad-SDK backend (same lidar/RTAB-Map setup, also verified end-to-end).
+
+![Go2 3D LiDAR point cloud in RViz](docs/images/go2_slam3d_pointcloud.png)
 
 **Nav2** against the CHAMP map/config: `ros2 launch launch/nav2_go2.launch.py`.
 
@@ -312,6 +314,8 @@ Go2 can carry a 5-DOF arm (no gripper) mounted on the body — CHAMP's stock dem
 ```bash
 ros2 launch training/launch/gazebo_rl.launch.py headless:=false
 ```
+
+![Go2 with manipulator arm](docs/images/go2_manipulator_arm.png)
 
 Driven via `ros2_control` (`arm_position_controller`). **Not yet done:** not wired into the RL training envs, NMPC, or CHAMP's gait engine — visual/kinematic attachment only, holding a fixed pose.
 
@@ -345,7 +349,7 @@ python3 intelligence/navigation/waypoint_navigator.py --ros-args \
 
 1. ~~Fix `global_body_planner_node` segfault on hard terrain.~~ **Fixed.**
 2. ~~Retrain MuJoCo RL policy against reward-hack fix.~~ **Retrained, partially verified** — real forward velocity, but episodes still end early (~1.5-2s falls).
-3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Fixed, untested in sim.**
+3. ~~Fix `/cmd_vel` walking on the native Gazebo backend.~~ **Fixed, verified in sim** — headless `training/launch/gazebo_rl.launch.py` responds to `/cmd_vel` (forward + turn) with visible motion; actual speed tracks well below commanded (~25% of 0.25 m/s over a short window), likely needs gait tuning.
 4. ~~Evaluate multi-terrain RL pipeline.~~ **Evaluated — no meaningful blind/sighted gap found.**
 5. **Wire the manipulator arm into something that does work** — currently decorative only.
 6. ~~Fall-recovery env + arm-in-MuJoCo-RL + Gazebo reward fix.~~ **Done, need more training/verification.**

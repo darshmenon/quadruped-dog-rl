@@ -42,6 +42,14 @@ TILT_RESET_RAD = 0.75
 RESET_COOLDOWN_S = 2.0
 POSE_CHECK_PERIOD_S = 0.5
 MIN_BASE_Z = 0.18
+# Even with the stance held rigidly (see p_gain/d_gain in make_go2_stand.py),
+# a small steady-state stance-pose/CoM imbalance makes the base creep a few
+# cm/s while otherwise "standing still" and idle (no /cmd_vel). Harmless for
+# real teleop/walking, but wanders arbitrarily far over a long idle hold
+# (e.g. verification runs, demos). Re-anchor with the same pause/teleport/
+# resume path used for fall recovery once it strays this far from where it
+# started idling.
+IDLE_DRIFT_RESET_M = 0.5
 ROLL_KP = 0.18
 PITCH_KP = 0.16
 # Cancel measured yaw rate when walking straight (open-loop gait drifts).
@@ -72,6 +80,8 @@ class StandPublisher(Node):
         self._last_cmd_time = 0.0
         self._last_reset_time = 0.0
         self._last_pose_check_time = 0.0
+        self._last_pose = None
+        self._idle_anchor = None
         self._roll = 0.0
         self._pitch = 0.0
         self._yaw_rate = 0.0
@@ -137,17 +147,40 @@ class StandPublisher(Node):
 
     def maybe_recover(self):
         imu_fallen = max(abs(self._roll), abs(self._pitch)) >= TILT_RESET_RAD
-        pose_fallen = self._model_pose_fallen()
-        if not imu_fallen and not pose_fallen:
+        pose = self._read_pose()
+        pose_fallen = pose is not None and pose[2] < MIN_BASE_Z
+
+        idle = not self._cmd_is_active()
+        if not idle:
+            self._idle_anchor = None
+        elif pose is not None and self._idle_anchor is None:
+            self._idle_anchor = pose[:2]
+
+        idle_drifted = (
+            idle
+            and pose is not None
+            and self._idle_anchor is not None
+            and np.hypot(pose[0] - self._idle_anchor[0], pose[1] - self._idle_anchor[1])
+            >= IDLE_DRIFT_RESET_M
+        )
+
+        if not imu_fallen and not pose_fallen and not idle_drifted:
             return
         now = time.monotonic()
         if now - self._last_reset_time < RESET_COOLDOWN_S:
             return
         self._last_reset_time = now
         self._cmd[:] = 0.0
-        self.get_logger().warn(
-            f"fall detected roll={self._roll:.2f} pitch={self._pitch:.2f}; resetting upright"
-        )
+        if imu_fallen or pose_fallen:
+            self.get_logger().warn(
+                f"fall detected roll={self._roll:.2f} pitch={self._pitch:.2f}; resetting upright"
+            )
+            reset_x, reset_y = 0.0, 0.0
+        else:
+            self.get_logger().warn(
+                f"idle drift >= {IDLE_DRIFT_RESET_M}m from anchor; re-centering"
+            )
+            reset_x, reset_y = self._idle_anchor
         _gz_service(
             "/world/go2_rl/control",
             "gz.msgs.WorldControl",
@@ -158,8 +191,10 @@ class StandPublisher(Node):
             "/world/go2_rl/set_pose",
             "gz.msgs.Pose",
             "gz.msgs.Boolean",
-            "name: 'go2' position: {x: 0 y: 0 z: 0.32} orientation: {w: 1 x: 0 y: 0 z: 0}",
+            f"name: 'go2' position: {{x: {reset_x} y: {reset_y} z: 0.32}} "
+            "orientation: {w: 1 x: 0 y: 0 z: 0}",
         )
+        self._idle_anchor = (reset_x, reset_y)
         for _ in range(25):
             self.publish_once()
             rclpy.spin_once(self, timeout_sec=0.0)
@@ -171,10 +206,11 @@ class StandPublisher(Node):
             "pause: false",
         )
 
-    def _model_pose_fallen(self):
+    def _read_pose(self):
+        """Poll the base pose (x, y, z) at most once per POSE_CHECK_PERIOD_S."""
         now = time.monotonic()
         if now - self._last_pose_check_time < POSE_CHECK_PERIOD_S:
-            return False
+            return self._last_pose
         self._last_pose_check_time = now
 
         try:
@@ -186,23 +222,23 @@ class StandPublisher(Node):
                 timeout=1.0,
             )
         except subprocess.TimeoutExpired:
-            return False
+            return self._last_pose
         if result.returncode != 0:
-            return False
+            return self._last_pose
 
         match = re.search(
-            r'name: "go2".*?position \{.*?z: ([^\s]+).*?\}.*?orientation \{(.*?)\}',
+            r'name: "go2".*?position \{\s*x: ([^\s]+)\s*y: ([^\s]+)\s*z: ([^\s]+)',
             result.stdout,
             re.S,
         )
         if not match:
-            return False
+            return self._last_pose
 
         try:
-            base_z = float(match.group(1))
+            self._last_pose = tuple(float(g) for g in match.groups())
         except ValueError:
-            return False
-        return base_z < MIN_BASE_Z
+            pass
+        return self._last_pose
 
     def publish_once(self):
         if not self._cmd_is_active():

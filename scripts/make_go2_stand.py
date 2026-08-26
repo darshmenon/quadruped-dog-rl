@@ -174,9 +174,16 @@ for jname, angle in STANDING_POSE.items():
     plugin.set("name", "gz::sim::systems::JointPositionController")
     ET.SubElement(plugin, "joint_name").text = jname
     ET.SubElement(plugin, "topic").text = f"/go2/cmd/{jname}"
-    ET.SubElement(plugin, "p_gain").text = "80"
+    # p_gain/d_gain raised from 80/4: at 80 the legs were too compliant to hold
+    # the commanded stance rigidly under the arm's added weight, so the base
+    # slowly sank (0.32 -> ~0.25) and crept sideways at ~0.07-0.08 m/s even
+    # with all IMU posture feedback disabled. 300/15 holds height near the
+    # commanded 0.32 and roughly halves the steady-state creep (measured
+    # ~0.036 m/s); it does not eliminate it -- that's a genuine stance-pose/
+    # CoM equilibrium issue (see STANDING_POSE above), not a gain problem.
+    ET.SubElement(plugin, "p_gain").text = "300"
     ET.SubElement(plugin, "i_gain").text = "0"
-    ET.SubElement(plugin, "d_gain").text = "4"
+    ET.SubElement(plugin, "d_gain").text = "15"
     ET.SubElement(plugin, "i_max").text = "0"
     ET.SubElement(plugin, "i_min").text = "0"
     ET.SubElement(plugin, "cmd_max").text = "120"
