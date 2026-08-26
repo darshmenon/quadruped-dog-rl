@@ -24,8 +24,6 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("foxglove", default_value="false",
                               description="Start foxglove_bridge if installed"),
-        DeclareLaunchArgument("ros_domain_id", default_value="157"),
-        DeclareLaunchArgument("gz_partition", default_value="go2indoor"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(REPO / "launch" / "slam3d_go2.launch.py")),
             launch_arguments={
@@ -35,8 +33,6 @@ def generate_launch_description():
                 "rviz": LaunchConfiguration("rviz"),
                 "explore": "true",
                 "track_obstacles": "true",
-                "ros_domain_id": LaunchConfiguration("ros_domain_id"),
-                "gz_partition": LaunchConfiguration("gz_partition"),
             }.items(),
         ),
         Node(

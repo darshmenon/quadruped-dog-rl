@@ -46,18 +46,6 @@ def generate_launch_description():
                     "and publishing /projected_map for Nav2's octomap_layer (StaticLayer) in "
                     "config/go2_navigation.yaml. Requires enable_lidar3d and a 'map' TF (Nav2's "
                     "AMCL) to actually integrate scans -- harmless no-op without either.")
-    ros_domain_id_arg = DeclareLaunchArgument(
-        "ros_domain_id", default_value="177",
-        description="ROS_DOMAIN_ID for this launch tree, isolated from other concurrent "
-                    "ROS2 workspaces on this machine (quad_sdk's real-robot scripts hardcode "
-                    "42, launch/slam3d_go2.launch.py uses 157).")
-    gz_partition_arg = DeclareLaunchArgument(
-        "gz_partition", default_value="go2rltrain",
-        description="GZ_PARTITION for this launch tree's Gazebo transport, isolated from "
-                    "any other gz sim instance running concurrently.")
-    ros_domain_id = LaunchConfiguration("ros_domain_id")
-    gz_partition = LaunchConfiguration("gz_partition")
-
     # go2_gz.urdf's manipulator arm links (see
     # ros2/champ_description/urdf/arm.urdf.xacro) use package://champ_description
     # mesh URIs. Gazebo resolves those against GZ_SIM_RESOURCE_PATH, not ROS's
@@ -79,10 +67,6 @@ def generate_launch_description():
         enable_arm_reach_arg,
         enable_lidar3d_arg,
         enable_octomap_arg,
-        ros_domain_id_arg,
-        gz_partition_arg,
-        SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id),
-        SetEnvironmentVariable("GZ_PARTITION", gz_partition),
         gz_resource_path,
         OpaqueFunction(function=_launch_setup),
     ])

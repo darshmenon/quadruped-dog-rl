@@ -20,10 +20,6 @@ for that 2D path):
   itself -- it just publishes goals to Quad-SDK's live goal_state topic
   and lets global_body_planner/nmpc_controller do the walking.
 
-Runs in its own ROS_DOMAIN_ID/GZ_PARTITION by default so it doesn't cross
-talk with other ROS2/Gazebo sessions on this machine (see README) -- override
-if you actually want to share a domain with another terminal.
-
 Usage:
     source /opt/ros/humble/setup.bash
     source ros2/install/setup.bash
@@ -40,7 +36,6 @@ from launch.actions import (
     ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
-    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, LaunchConfigurationEquals
@@ -295,8 +290,6 @@ def generate_launch_description():
     nmpc_world = LaunchConfiguration("nmpc_world")
     explore = LaunchConfiguration("explore")
     track_obstacles = LaunchConfiguration("track_obstacles")
-    ros_domain_id = LaunchConfiguration("ros_domain_id")
-    gz_partition = LaunchConfiguration("gz_partition")
 
     # quad_gazebo.py's `gui` arg is the inverse of this launch's `headless`
     # (same true/false semantics as champ_go2_gazebo.launch.py, just spelled
@@ -349,18 +342,6 @@ def generate_launch_description():
                                description="Auto-start scripts/frontier_explorer_go2.py"),
         DeclareLaunchArgument("track_obstacles", default_value="false",
                                description="Auto-start scripts/obstacle_tracker_go2.py"),
-        DeclareLaunchArgument(
-            "ros_domain_id", default_value="157",
-            description="ROS_DOMAIN_ID for this launch tree, isolated from other concurrent "
-                        "ROS2 workspaces on this machine (quad_sdk's real-robot scripts hardcode "
-                        "42; unset/default is 0). Must be 0..232 — FastDDS's default port math "
-                        "rejects higher IDs with 'Calculated port number is too high'."),
-        DeclareLaunchArgument(
-            "gz_partition", default_value="quad3dslam",
-            description="GZ_PARTITION for this launch tree's Gazebo transport, isolated from "
-                        "any other gz sim instance running concurrently."),
-        SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id),
-        SetEnvironmentVariable("GZ_PARTITION", gz_partition),
         # rtabmap's database_path parents below must exist before the node
         # opens them -- ~/.ros is often root-owned after mixed-privilege
         # sessions, so we keep the DBs under /tmp/go2_rtabmap instead.
