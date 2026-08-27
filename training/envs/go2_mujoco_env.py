@@ -220,6 +220,7 @@ class Go2MujocoEnv(gym.Env):
         self._steps_since_push = 0
         self._max_steps = int(EPISODE_LEN_S / (SIM_DT * CTRL_DECIMATION))
         self._last_episode_steps = self._max_steps
+        self._stall_steps = 0
 
         self.curriculum_level = float(initial_curriculum_level)
         # Mirrors `cmd`: a fixed reach target for non-curriculum use (e.g.
@@ -469,6 +470,20 @@ class Go2MujocoEnv(gym.Env):
         is_stalling = cmd_speed > 0.15 and actual_speed < 0.3 * cmd_speed
         r_stall = -0.6 if is_stalling else 0.0
 
+        # ALIVE_BONUS was meant to stop early termination from ever being a
+        # shortcut to dodge penalties, but it's unconditional -- a policy
+        # that freezes at a safe crouch (never falls, never moves) still
+        # earns ALIVE_BONUS every step, which alone funds riding out the
+        # -0.6 stall penalty for a full 1000-step episode rather than
+        # actually attempting to walk (confirmed: a converged checkpoint
+        # settled into z~0.16m, 0.00m displacement, steady ~-0.8 reward/step
+        # for 1000/1000 steps -- a new instance of the same "reward-gate the
+        # exploited term" pattern reach_gate above was added for). Gating it
+        # off during a stall keeps the original protection for a genuinely
+        # complying robot while removing the subsidy for frozen-in-place
+        # stalling specifically.
+        r_alive = 0.0 if is_stalling else ALIVE_BONUS
+
         ee_pos = d.sensor("ee_pos").data.astype(np.float32)
         reach_dist = float(np.linalg.norm(self.reach_target - ee_pos))
         # Once REACH_WEIGHT was raised to match locomotion's scale, standing
@@ -493,7 +508,7 @@ class Go2MujocoEnv(gym.Env):
         components = dict(
             lin=r_lin, ang=r_ang, vz=r_z, height=r_height,
             orient=r_orient, torque=r_torque, smooth=r_smooth, contact=r_contact,
-            stall=r_stall, alive=ALIVE_BONUS,
+            stall=r_stall, alive=r_alive,
             reach=r_reach, reach_dense=r_reach_dense, reach_mid=r_reach_mid,
             reach_bonus=r_reach_bonus,
             air_time=r_air, slip=r_slip,
@@ -727,7 +742,16 @@ class Go2MujocoEnv(gym.Env):
         super().reset(seed=seed)
 
         if self.use_curriculum:
-            success = self._last_episode_steps >= 0.75 * self._max_steps
+            # Surviving alone isn't "success" -- a policy that freezes at a
+            # safe crouch and never actually complies with cmd also survives
+            # the full episode (confirmed: a converged checkpoint sat at
+            # z~0.16m, 0.00m displacement, for 1000/1000 steps), which was
+            # advancing curriculum_level toward harder commands/pushes for a
+            # policy that had never learned to walk at all. Require it
+            # wasn't stalling (see is_stalling in _compute_reward) for most
+            # of the episode too.
+            success = (self._last_episode_steps >= 0.75 * self._max_steps
+                       and self._stall_steps < 0.5 * self._last_episode_steps)
             self.curriculum_level = float(np.clip(
                 self.curriculum_level + (0.005 if success else -0.002),
                 0.0, MAX_CURRICULUM_LEVEL))
@@ -763,6 +787,7 @@ class Go2MujocoEnv(gym.Env):
         self._steps_since_push = 0
         self._last_push[:] = 0.0
         self._last_episode_steps = 0
+        self._stall_steps = 0
         self._gait_index = 0.0
         self._feet_air_time[:] = 0.0
         self._last_contacts[:] = False
@@ -781,6 +806,8 @@ class Go2MujocoEnv(gym.Env):
         self._maybe_push()
         self._step_gait()
         reward, components = self._compute_reward(action)
+        if components["stall"] < 0:
+            self._stall_steps += 1
         self._prev_action = action.copy()
         self._step_count += 1
         self._last_episode_steps = self._step_count
