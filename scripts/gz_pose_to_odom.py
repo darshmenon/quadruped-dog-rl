@@ -1,50 +1,25 @@
 #!/usr/bin/env python3
-"""Publish odom and odom->base TF from the Gazebo model pose."""
+"""Publish odom and odom->base TF from a live Gazebo pose subscription."""
 
 import argparse
 import math
-import re
-import subprocess
+import os
+import threading
 
+# gz.msgs10's generated _pb2 modules were built against a protobuf version
+# newer than what upb-based rclpy/system protobuf expects here -- importing
+# them under the default (C++) protobuf implementation raises "Descriptors
+# cannot be created directly". Force the pure-Python implementation before
+# the gz.msgs10/gz.transport13 imports below pull protobuf in.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+import gz.transport13 as gz_transport
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from gz.msgs10.pose_v_pb2 import Pose_V
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
-
-
-def _field(block, name, default):
-    match = re.search(rf"\b{name}:\s*([-+0-9.eE]+)", block)
-    return float(match.group(1)) if match else default
-
-
-def _section(text, marker):
-    start = text.find(marker)
-    if start < 0:
-        return ""
-    next_pose = text.find("\npose {", start + len(marker))
-    return text[start:] if next_pose < 0 else text[start:next_pose]
-
-
-def _parse_pose(text, model_name):
-    block = _section(text, f'name: "{model_name}"')
-    if not block:
-        return None
-
-    position = re.search(r"position\s*\{([^}]*)\}", block, re.S)
-    orientation = re.search(r"orientation\s*\{([^}]*)\}", block, re.S)
-    pos = position.group(1) if position else ""
-    quat = orientation.group(1) if orientation else ""
-
-    return {
-        "x": _field(pos, "x", 0.0),
-        "y": _field(pos, "y", 0.0),
-        "z": _field(pos, "z", 0.0),
-        "qx": _field(quat, "x", 0.0),
-        "qy": _field(quat, "y", 0.0),
-        "qz": _field(quat, "z", 0.0),
-        "qw": _field(quat, "w", 1.0),
-    }
 
 
 def _yaw_from_quat(qx, qy, qz, qw):
@@ -60,7 +35,6 @@ def _angle_delta(current, previous):
 class GazeboPoseOdom(Node):
     def __init__(self, world, model, odom_frame, base_frame, rate):
         super().__init__("gz_pose_to_odom")
-        self.topic = f"/world/{world}/pose/info"
         self.model = model
         self.odom_frame = odom_frame
         self.base_frame = base_frame
@@ -68,25 +42,42 @@ class GazeboPoseOdom(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.last_pose = None
         self.last_time = None
+
+        # gz-transport delivers messages on its own internal thread -- guard
+        # the handoff to the ROS timer below with a lock instead of spawning
+        # a `gz topic -e -n1` subprocess per tick (the old approach), which
+        # jittered badly under load and produced stale odom->base TF that
+        # blew RTAB-Map's wait_for_transform and octomap_server's message
+        # filter queue.
+        self._pose_lock = threading.Lock()
+        self._latest_pose = None
+
+        self._gz_node = gz_transport.Node()
+        topic = f"/world/{world}/pose/info"
+        if not self._gz_node.subscribe(Pose_V, topic, self._on_pose_v):
+            self.get_logger().error(f"failed to subscribe to {topic}")
+
         self.timer = self.create_timer(1.0 / rate, self.publish_pose)
 
-    def publish_pose(self):
-        try:
-            result = subprocess.run(
-                ["gz", "topic", "-e", "-n", "1", "-t", self.topic],
-                capture_output=True,
-                text=True,
-                timeout=0.25,
-            )
-        except (subprocess.TimeoutExpired, PermissionError, OSError):
-            # TimeoutExpired can itself raise PermissionError when the
-            # runtime can't SIGKILL the hung `gz topic` child (sandbox /
-            # restricted environments) -- treat that the same as a miss.
-            return
+    def _on_pose_v(self, msg):
+        for pose in msg.pose:
+            if pose.name == self.model:
+                with self._pose_lock:
+                    self._latest_pose = {
+                        "x": pose.position.x,
+                        "y": pose.position.y,
+                        "z": pose.position.z,
+                        "qx": pose.orientation.x,
+                        "qy": pose.orientation.y,
+                        "qz": pose.orientation.z,
+                        "qw": pose.orientation.w,
+                    }
+                return
 
-        if result.returncode != 0:
-            return
-        pose = _parse_pose(result.stdout, self.model)
+    def publish_pose(self):
+        with self._pose_lock:
+            pose = self._latest_pose
+
         if pose is None:
             return
 

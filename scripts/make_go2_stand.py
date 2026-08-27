@@ -183,7 +183,15 @@ for jname, angle in STANDING_POSE.items():
     # CoM equilibrium issue (see STANDING_POSE above), not a gain problem.
     ET.SubElement(plugin, "p_gain").text = "300"
     ET.SubElement(plugin, "i_gain").text = "0"
-    ET.SubElement(plugin, "d_gain").text = "15"
+    # d_gain raised further to 30 (vs. the 15 that matched p_gain's stand-pose
+    # scaling above): these same per-joint controllers also track CHAMP's
+    # swing/stance trajectory during walking, and 300/15 is stiff enough that
+    # each foot's ground contact behaves like an underdamped spring -- visibly
+    # a hop/bounce on touchdown rather than a settled stance. Doubling d_gain
+    # alone (p_gain unchanged, so the stand-pose height/creep fix is kept)
+    # raises the damping ratio and absorbs that contact energy instead of
+    # bouncing it back.
+    ET.SubElement(plugin, "d_gain").text = "30"
     ET.SubElement(plugin, "i_max").text = "0"
     ET.SubElement(plugin, "i_min").text = "0"
     ET.SubElement(plugin, "cmd_max").text = "120"
