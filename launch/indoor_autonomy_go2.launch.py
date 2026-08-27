@@ -24,11 +24,22 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("foxglove", default_value="false",
                               description="Start foxglove_bridge if installed"),
+        DeclareLaunchArgument(
+            "locomotion", default_value="champ",
+            description="Locomotion backend: 'champ' (default, generic gait engine -- "
+                        "not physics-tuned for Go2, see README) or 'nmpc' (Quad-SDK "
+                        "global/local planner + NMPC controller, the backend verified "
+                        "to actually walk cleanly; uses ros2/quad_sdk/quad_simulator/"
+                        "quad_sim_scripts/worlds/go2_room.sdf, a copy of "
+                        "go2_gz_world_room.sdf renamed to Quad-SDK's expected "
+                        "'default' world name).",
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(REPO / "launch" / "slam3d_go2.launch.py")),
             launch_arguments={
-                "locomotion": "champ",
+                "locomotion": LaunchConfiguration("locomotion"),
                 "world": str(ROOM_WORLD),
+                "nmpc_world": "go2_room.sdf",
                 "headless": LaunchConfiguration("headless"),
                 "rviz": LaunchConfiguration("rviz"),
                 "explore": "true",

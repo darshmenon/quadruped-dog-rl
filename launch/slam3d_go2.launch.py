@@ -28,6 +28,7 @@ Usage:
     ros2 launch launch/slam3d_go2.launch.py locomotion:=nmpc headless:=true explore:=true
 """
 
+import os
 from pathlib import Path
 
 from launch import LaunchDescription
@@ -36,6 +37,7 @@ from launch.actions import (
     ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, LaunchConfigurationEquals
@@ -49,6 +51,8 @@ DEFAULT_WORLD = REPO / "training" / "envs" / "go2_gz_world_outdoor.sdf"
 FRONTIER_EXPLORER = REPO / "scripts" / "frontier_explorer_go2.py"
 OBSTACLE_TRACKER = REPO / "scripts" / "obstacle_tracker_go2.py"
 GROUND_TRUTH_TO_ODOM = REPO / "scripts" / "quadsdk_ground_truth_to_odom.py"
+QUAD_SDK_INSTALL = REPO / "ros2" / "install"
+QUAD_SDK_LOCAL_DEPS = REPO / "ros2" / "quad_sdk_external" / "local"
 
 RTABMAP_COMMON_PARAMS = {
     "use_sim_time": True,
@@ -149,6 +153,38 @@ def _champ_actions(headless, world, explore, track_obstacles):
     )
 
     return [champ_gazebo, points_bridge, rtabmap_slam, frontier_explorer, obstacle_tracker]
+
+
+def _nmpc_env_actions():
+    # Mirrors ros2/quad_sdk_external/setup_env.sh, which walk_quadsdk_go2.sh
+    # sources by hand before its own `ros2 launch quad_utils quad_gazebo.py`.
+    # Without these, gz-sim can't resolve the go2 model's model://imu (and
+    # other quad_sdk_external submodel) URIs -- UserCommands fails spawn
+    # with "Unable to find uri[model://imu]" for any locomotion:=nmpc launch
+    # that goes through this file instead of walk_quadsdk_go2.sh.
+    resource_dirs = [
+        str(QUAD_SDK_INSTALL / "quad_sim_scripts" / "share" / "quad_sim_scripts" / "models"),
+        str(QUAD_SDK_INSTALL / "quad_sim_scripts" / "share" / "quad_sim_scripts" / "worlds"),
+        str(QUAD_SDK_INSTALL / "go2_description" / "share" / "go2_description" / "models"),
+        str(QUAD_SDK_INSTALL / "objects_description" / "share" / "objects_description" / "models"),
+        str(QUAD_SDK_INSTALL / "sensor_description" / "share" / "sensor_description" / "models"),
+    ]
+    existing_resource_path = os.environ.get("GZ_SIM_RESOURCE_PATH", "")
+    resource_path = ":".join(resource_dirs + ([existing_resource_path] if existing_resource_path else []))
+
+    plugin_dir = str(QUAD_SDK_INSTALL / "gazebo_plugins" / "lib")
+    existing_plugin_path = os.environ.get("GZ_SIM_SYSTEM_PLUGIN_PATH", "")
+    plugin_path = f"{existing_plugin_path}:{plugin_dir}" if existing_plugin_path else plugin_dir
+
+    lib_dir = str(QUAD_SDK_LOCAL_DEPS / "lib")
+    existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_path = f"{lib_dir}:{existing_ld_path}" if existing_ld_path else lib_dir
+
+    return [
+        SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", resource_path),
+        SetEnvironmentVariable("GZ_SIM_SYSTEM_PLUGIN_PATH", plugin_path),
+        SetEnvironmentVariable("LD_LIBRARY_PATH", ld_path),
+    ]
 
 
 def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore, track_obstacles):
@@ -279,8 +315,10 @@ def _nmpc_actions(nmpc_gui_flag, nmpc_world, explore, track_obstacles):
         )],
     )
 
-    return [quad_gazebo, stand, nmpc_plan, points_bridge, lidar_static_tf,
-            ground_truth_to_odom, rtabmap_slam, frontier_explorer, obstacle_tracker]
+    return _nmpc_env_actions() + [
+        quad_gazebo, stand, nmpc_plan, points_bridge, lidar_static_tf,
+        ground_truth_to_odom, rtabmap_slam, frontier_explorer, obstacle_tracker,
+    ]
 
 
 def generate_launch_description():
