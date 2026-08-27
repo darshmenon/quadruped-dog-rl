@@ -232,7 +232,15 @@ def main():
 
     callbacks = [
         RewardComponentCallback(log_interval=1000),
-        CheckpointCallback(save_freq=50_000, save_path=ckpt_dir,
+        # SB3's CheckpointCallback counts n_calls (one per vectorized step),
+        # not total timesteps -- without dividing by n_envs it needs 8x the
+        # intended 50k timesteps between saves (SB3 docs warn about exactly
+        # this). Combined with n_calls resetting to 0 on every --resume, a
+        # crashed session shorter than 50_000 * n_envs steps saved zero model
+        # checkpoints despite VecNormSaveCallback (which is num_timesteps-
+        # based, see below) saving fine the whole time -- lost ~260k steps
+        # of real progress to a mid-run CUDA crash before this was caught.
+        CheckpointCallback(save_freq=max(50_000 // args.n_envs, 1), save_path=ckpt_dir,
                            name_prefix="go2_mujoco"),
         VecNormSaveCallback(vec_env, ckpt_dir, save_freq=50_000,
                             curriculum_path=curriculum_path),
