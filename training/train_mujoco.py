@@ -90,6 +90,34 @@ class VecNormSaveCallback(BaseCallback):
         return True
 
 
+class FreezeObsNormCallback(BaseCallback):
+    """Stops VecNormalize from updating its running obs/reward stats once
+    num_timesteps crosses freeze_at.
+
+    EvalCallback syncs the *live*, still-updating obs_rms from the training
+    VecNormalize at every eval call, but a saved vecnorm_*_steps.pkl is a
+    discrete snapshot -- replaying the same model checkpoint against a
+    snapshot a few thousand steps off from the live-sync instant swung eval
+    reward 10x (43 vs 936) in practice, because obs scaling directly shifts
+    what the policy sees. Freezing stops the drift so any snapshot taken
+    after freeze_at matches what live eval sees, and saved checkpoints
+    become trustworthy again.
+    """
+
+    def __init__(self, vec_env: VecNormalize, freeze_at: int):
+        super().__init__()
+        self._vec_env = vec_env
+        self._freeze_at = freeze_at
+        self._frozen = False
+
+    def _on_step(self) -> bool:
+        if not self._frozen and self.num_timesteps >= self._freeze_at:
+            self._vec_env.training = False
+            self._frozen = True
+            print(f"Froze VecNormalize obs/reward stats at num_timesteps={self.num_timesteps}")
+        return True
+
+
 # --------------------------------------------------------------------------- #
 # Env factory
 # --------------------------------------------------------------------------- #
@@ -150,6 +178,14 @@ def main():
                              "VecNormalize reward stats can destabilize the resumed policy")
     parser.add_argument("--log-dir", type=str, default=None,
                         help="override training log directory")
+    parser.add_argument("--freeze-obs-at", type=int, default=None,
+                        help="absolute total_timesteps at which to stop updating "
+                             "VecNormalize's running obs/reward stats (see "
+                             "FreezeObsNormCallback) -- makes eval and saved "
+                             "checkpoints reproducible instead of drifting; leave "
+                             "unset for the old always-updating behavior, e.g. early "
+                             "in a fresh run when the state distribution is still "
+                             "genuinely changing")
     args = parser.parse_args()
 
     log_dir = args.log_dir
@@ -246,6 +282,8 @@ def main():
                             curriculum_path=curriculum_path),
         eval_callback,
     ]
+    if args.freeze_obs_at is not None:
+        callbacks.append(FreezeObsNormCallback(vec_env, args.freeze_obs_at))
 
     if args.resume:
         norm_path = args.vecnorm
