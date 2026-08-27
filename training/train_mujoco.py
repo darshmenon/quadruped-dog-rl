@@ -246,7 +246,14 @@ def main():
         best_model_save_path=log_dir,
         log_path=log_dir,
         eval_freq=50_000,
-        n_eval_episodes=5,
+        # 5 episodes was too few once the robot's failure mode became
+        # high-variance instead of consistently frozen -- a single lucky
+        # long survival can drag a 5-episode mean up 10x (confirmed: eval
+        # reported 2070 at one checkpoint, but a real 40-episode replay of
+        # the same checkpoint averaged 7.6 with a 100% fall rate). 20 washes
+        # that outlier luck out enough to trust eval_callback's own numbers
+        # again without needing an external large-sample replay each time.
+        n_eval_episodes=20,
         deterministic=True,
         render=False,
     )

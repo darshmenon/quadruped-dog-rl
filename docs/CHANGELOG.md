@@ -8,6 +8,16 @@ Detailed root-cause writeups for fixes referenced from the main [README](../READ
 
 Worth knowing if you see `ep_len_mean` stuck at 1.
 
+## Frozen-crouch alive-bonus exploit (MuJoCo walk+arm-reach)
+
+**Status: fixed, retrained, real improvement confirmed.**
+
+A checkpoint that looked fine in `evaluations.npz` (eval reward bouncing around 130-2000) turned out to have converged to a different exploit entirely: `play_policy.py --episodes 10` showed every episode surviving the full 1000 steps with 0.00m displacement and mean reward ≈ -720 — the robot locks its legs into a static crouch at `z≈0.16m` (just above the 0.15m fall threshold) and never moves again. Root cause: `ALIVE_BONUS` (0.3/step, meant to stop early termination from ever being a shortcut around penalties) was unconditional, so a frozen robot still earns +300 over a full episode just for existing, on top of dodging the one-time `-8` `FALL_PENALTY` that any real (and inherently riskier) walking attempt risks. Same class of bug `reach_gate` below was already added for — a reward term meant to be neutral/protective turns into a subsidy once combined with a specific failure mode.
+
+Separately, this is why the exploit went unnoticed for a while: `EvalCallback`'s `n_eval_episodes=5` was far too small a sample once the failure mode became high-variance instead of consistently frozen — a single lucky long-survival episode can drag a 5-episode mean up 10x (one checkpoint reported eval reward 2070; a real 40-episode replay of the same checkpoint averaged 7.6 with a 100% fall rate). Bumped to 20.
+
+Fix applied: gate `ALIVE_BONUS` off during a detected stall (`is_stalling`, the same condition `reach_gate` already used), and require the curriculum's per-episode "success" signal to also check the robot wasn't stalling for most of the episode — previously "survived 75% of max_steps" was satisfiable by freezing in place, silently escalating command speed/push difficulty for a policy that had never learned to walk. Confirmed effective after ~4M steps of retraining past the fix: 20-episode eval reward climbed from 19.8 to 598-670 (above the historical ~460 peak), though still high-variance (episode length 47→330 across evals) — real progress, not yet a fully reliable gait.
+
 ## `reach` reward never trained the arm (MuJoCo walk+arm-reach)
 
 **Status: root cause found, fix not yet trained against.**
